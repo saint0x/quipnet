@@ -943,6 +943,16 @@ impl LocalControlPlane {
         Ok(self.ensure_state()?.active_sessions.clone())
     }
 
+    pub fn sync_runtime_sessions<T>(&self, transport: &T) -> Result<DaemonState, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let mut state = self.ensure_state()?;
+        state.active_sessions = transport.active_sessions()?;
+        state.save(&self.config.state_path)?;
+        Ok(state)
+    }
+
     pub async fn close_session<T>(
         &self,
         session_id: &[u8; 16],
@@ -959,7 +969,8 @@ impl LocalControlPlane {
         if transport.session_snapshot(session_id)?.is_some() {
             transport.close_session(&session).await?;
         }
-        let state = state.without_session(session_id);
+        let mut state = state.without_session(session_id);
+        state.active_sessions = transport.active_sessions()?;
         state.save(&self.config.state_path)?;
         Ok(())
     }
@@ -991,9 +1002,10 @@ impl LocalControlPlane {
         }
         let route = state.route_plan(&session.peer, Some(protocol), session.class)?;
         let upgraded = transport.migrate(&session, route).await?;
-        let state = state
+        let mut state = state
             .without_session(&persisted.session_id)
             .with_active_session(upgraded.clone());
+        state.active_sessions = transport.active_sessions()?;
         state.save(&self.config.state_path)?;
         Ok(upgraded)
     }
@@ -1098,6 +1110,7 @@ impl LocalControlPlane {
             });
         }
 
+        state.active_sessions = transport.active_sessions()?;
         state.save(&self.config.state_path)?;
         Ok(SessionReconcileReport {
             examined: entries.len(),
@@ -1116,7 +1129,7 @@ impl LocalControlPlane {
         transport: &T,
     ) -> Result<SessionSnapshot, DaemonStateError>
     where
-        T: SecureTransport,
+        T: SessionLifecycleTransport,
     {
         let state = self.ensure_state()?;
         let policy = state.explain_policy(peer, protocol);
@@ -1126,7 +1139,8 @@ impl LocalControlPlane {
         let route = state.route_plan(peer, Some(protocol.clone()), class)?;
         let connection = transport.connect(route).await?;
         let session = connection.snapshot();
-        let state = state.with_active_session(session.clone());
+        let mut state = state.with_active_session(session.clone());
+        state.active_sessions = transport.active_sessions()?;
         state.save(&self.config.state_path)?;
         Ok(session)
     }
@@ -2815,6 +2829,45 @@ mod tests {
         );
         assert!(persisted.active_sessions.is_empty());
 
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn sync_runtime_sessions_replaces_persisted_active_sessions() {
+        let state_path = unique_state_path("quicnet-sync-runtime-sessions-state");
+        let (control, transport, session, _bootstrap_peer) = establish_persisted_direct_session(
+            "direct-sync-runtime-prod",
+            &state_path,
+            93,
+            94,
+            b"direct-sync-runtime-target",
+        )
+        .await;
+        let mut persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        persisted.active_sessions.push(SessionSnapshot {
+            session_id: [3_u8; 16],
+            transport_session_id: [4_u8; 16],
+            relay_attempt_id: None,
+            peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"stale-peer"),
+            protocol: Some(ProtocolId::new("/quicnet/control/1").expect("protocol")),
+            class: TrafficClass::Control,
+            path_kind: PathKind::DirectUdp,
+            source: RouteSource::Observed,
+            remote_endpoint: "quic://198.51.100.90:8443".to_string(),
+            relay_peer: None,
+            relay_endpoint: None,
+            relay_control_endpoint: None,
+            datagrams_capable: true,
+            migration_capable: true,
+        });
+        persisted.save(&state_path).expect("stale persisted state should save");
+
+        let synced = control
+            .sync_runtime_sessions(&transport)
+            .expect("runtime sessions should become primary");
+
+        assert_eq!(synced.active_sessions.len(), 1);
+        assert_eq!(synced.active_sessions[0].session_id, session.session_id);
         let _ = std::fs::remove_file(state_path);
     }
 

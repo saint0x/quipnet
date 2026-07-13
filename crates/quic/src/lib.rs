@@ -69,15 +69,6 @@ impl QuicTransportAdapter {
         self
     }
 
-    pub fn active_sessions(&self) -> Vec<SessionSnapshot> {
-        self.runtime_sessions
-            .read()
-            .expect("runtime session registry should remain readable")
-            .values()
-            .map(|record| record.snapshot.clone())
-            .collect()
-    }
-
     pub fn owns_session(&self, session_id: &[u8; 16]) -> bool {
         self.runtime_sessions
             .read()
@@ -115,6 +106,16 @@ impl SecureTransport for QuicTransportAdapter {
 
 #[async_trait]
 impl SessionLifecycleTransport for QuicTransportAdapter {
+    fn active_sessions(&self) -> Result<Vec<SessionSnapshot>, TransportError> {
+        Ok(self
+            .runtime_sessions
+            .read()
+            .expect("runtime session registry should remain readable")
+            .values()
+            .map(|record| record.snapshot.clone())
+            .collect())
+    }
+
     fn session_snapshot(
         &self,
         session_id: &[u8; 16],

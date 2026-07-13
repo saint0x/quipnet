@@ -99,6 +99,8 @@ pub trait SecureTransport: Send + Sync {
 
 #[async_trait]
 pub trait SessionLifecycleTransport: SecureTransport {
+    fn active_sessions(&self) -> Result<Vec<SessionSnapshot>, TransportError>;
+
     fn session_snapshot(
         &self,
         session_id: &[u8; 16],

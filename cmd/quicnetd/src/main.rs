@@ -253,8 +253,9 @@ async fn run_cycle(
     transport: &QuicTransportAdapter,
     trigger: CycleTrigger,
 ) -> Result<DaemonCycleReport, fabric::DaemonStateError> {
-    let (preparation, reprobe_report, mut state) =
+    let (preparation, reprobe_report, _prepared_state) =
         prepare_state_for_trigger(args, control, local_identity, &trigger)?;
+    let mut state = control.sync_runtime_sessions(transport)?;
     let reconcile_report = if args.disable_reconcile {
         None
     } else {
