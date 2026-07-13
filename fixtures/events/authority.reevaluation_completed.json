@@ -1,0 +1,17 @@
+{
+  "event_id": "evt-1720000123000000001",
+  "event_type": "authority.reevaluation_completed",
+  "emitted_at": "2026-07-13T07:54:30Z",
+  "truth_kind": "runtime",
+  "subject": {
+    "kind": "authority",
+    "id": "ed25519:local-peer"
+  },
+  "details": {
+    "reevaluated_sessions": 1,
+    "closed_sessions": 1,
+    "unchanged_sessions": 0,
+    "reconnect_suppressions_added": 1,
+    "local_policy_denied": false
+  }
+}

@@ -11,9 +11,10 @@ use relaywire::RelayOpenRequest;
 use serde_json::json;
 use transport::{
     BindSpec, ConnectionHandle, ReconnectSuppression, RelayPlan, RoutePlan, RuntimeEvent,
-    RuntimeEventSubject, RuntimeListenerSnapshot, RuntimeListenerState, RuntimeReconnectState,
-    RuntimeSessionState, RuntimeTransportHealth, SecureTransport, SessionClosureReason,
-    SessionLifecycleTransport, SessionSnapshot, TransportError,
+    RuntimeEventSubject, RuntimeListenerSnapshot, RuntimeListenerState, RuntimeReconnectAttempt,
+    RuntimeReconnectAttemptState, RuntimeReconnectState, RuntimeSessionState,
+    RuntimeTransportHealth, SecureTransport, SessionClosureReason, SessionLifecycleTransport,
+    SessionSnapshot, TransportError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,11 @@ struct RuntimeListenerRecord {
     snapshot: RuntimeListenerSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeReconnectRecord {
+    snapshot: RuntimeReconnectAttempt,
+}
+
 #[derive(Clone)]
 pub struct QuicTransportAdapter {
     pub implementation: &'static str,
@@ -51,6 +57,7 @@ pub struct QuicTransportAdapter {
     runtime_listeners: Arc<RwLock<BTreeMap<String, RuntimeListenerRecord>>>,
     runtime_events: Arc<RwLock<VecDeque<RuntimeEvent>>>,
     reconnect_suppressions: Arc<RwLock<Vec<ReconnectSuppression>>>,
+    reconnect_attempts: Arc<RwLock<Vec<RuntimeReconnectRecord>>>,
 }
 
 impl Default for QuicTransportAdapter {
@@ -66,6 +73,7 @@ impl Default for QuicTransportAdapter {
             runtime_listeners: Arc::new(RwLock::new(BTreeMap::new())),
             runtime_events: Arc::new(RwLock::new(VecDeque::new())),
             reconnect_suppressions: Arc::new(RwLock::new(Vec::new())),
+            reconnect_attempts: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -291,9 +299,27 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .reconnect_suppressions
             .write()
             .expect("reconnect suppression registry should remain writable");
+        let removed = suppressions.iter().any(|entry| {
+            &entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class
+        });
         suppressions.retain(|entry| {
             !(&entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class)
         });
+        drop(suppressions);
+        if removed {
+            emit_runtime_event(
+                self,
+                "reconnect.unsuppressed".to_string(),
+                RuntimeEventSubject {
+                    kind: "peer".to_string(),
+                    id: peer.to_string(),
+                },
+                json!({
+                    "protocol": protocol.map(|protocol| protocol.as_str()),
+                    "class": class_label(class)
+                }),
+            );
+        }
         Ok(())
     }
 
@@ -331,24 +357,201 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .read()
             .expect("reconnect suppression registry should remain readable")
             .len();
+        let reconnect_attempts = self
+            .reconnect_attempts
+            .read()
+            .expect("reconnect attempt registry should remain readable")
+            .clone();
         let event_buffer_depth = self
             .runtime_events
             .read()
             .expect("runtime event buffer should remain readable")
             .len();
+        let reconnect_attempt_count = reconnect_attempts
+            .iter()
+            .filter(|entry| entry.snapshot.state == RuntimeReconnectAttemptState::BackingOff)
+            .count();
+        let reconnect_next_attempt_unix_secs = reconnect_attempts
+            .iter()
+            .filter(|entry| entry.snapshot.state == RuntimeReconnectAttemptState::BackingOff)
+            .map(|entry| entry.snapshot.next_attempt_unix_secs)
+            .min();
         Ok(RuntimeTransportHealth {
             active_sessions,
             active_listeners,
             reconnect_state: if reconnect_suppression_count > 0 {
                 RuntimeReconnectState::Suppressed
+            } else if reconnect_attempt_count > 0 {
+                RuntimeReconnectState::Active
+            } else if reconnect_attempts
+                .iter()
+                .any(|entry| entry.snapshot.state == RuntimeReconnectAttemptState::Failed)
+            {
+                RuntimeReconnectState::Failed
             } else {
                 RuntimeReconnectState::Idle
             },
+            reconnect_attempt_count,
+            reconnect_next_attempt_unix_secs,
             reconnect_suppression_count,
             event_buffer_depth,
             session_registry_healthy: true,
             listener_registry_healthy: true,
         })
+    }
+
+    fn reconnect_attempts(&self) -> Result<Vec<RuntimeReconnectAttempt>, TransportError> {
+        Ok(self
+            .reconnect_attempts
+            .read()
+            .expect("reconnect attempt registry should remain readable")
+            .iter()
+            .map(|entry| entry.snapshot.clone())
+            .collect())
+    }
+
+    fn schedule_reconnect(
+        &self,
+        peer: &model::PeerId,
+        protocol: Option<&model::ProtocolId>,
+        class: model::TrafficClass,
+        reason: String,
+        max_attempts: u32,
+        base_backoff_secs: u64,
+        max_backoff_secs: u64,
+    ) -> Result<RuntimeReconnectAttempt, TransportError> {
+        let now = current_unix_secs();
+        let mut attempts = self
+            .reconnect_attempts
+            .write()
+            .expect("reconnect attempt registry should remain writable");
+        let snapshot = if let Some(existing) = attempts.iter_mut().find(|entry| {
+            &entry.snapshot.peer == peer
+                && entry.snapshot.protocol.as_ref() == protocol
+                && entry.snapshot.class == class
+        }) {
+            existing.snapshot.attempt_count += 1;
+            existing.snapshot.reason = reason.clone();
+            existing.snapshot.last_attempt_unix_secs = now;
+            existing.snapshot.state = if existing.snapshot.attempt_count >= max_attempts {
+                RuntimeReconnectAttemptState::Failed
+            } else {
+                RuntimeReconnectAttemptState::BackingOff
+            };
+            let exp = existing.snapshot.attempt_count.saturating_sub(1).min(16);
+            let backoff = base_backoff_secs
+                .saturating_mul(1_u64 << exp)
+                .min(max_backoff_secs);
+            existing.snapshot.next_attempt_unix_secs = now.saturating_add(backoff);
+            existing.snapshot.max_attempts = max_attempts;
+            existing.snapshot.clone()
+        } else {
+            let snapshot = RuntimeReconnectAttempt {
+                peer: peer.clone(),
+                protocol: protocol.cloned(),
+                class,
+                state: if max_attempts <= 1 {
+                    RuntimeReconnectAttemptState::Failed
+                } else {
+                    RuntimeReconnectAttemptState::BackingOff
+                },
+                reason: reason.clone(),
+                attempt_count: 1,
+                last_attempt_unix_secs: now,
+                next_attempt_unix_secs: now.saturating_add(base_backoff_secs.min(max_backoff_secs)),
+                max_attempts,
+            };
+            attempts.push(RuntimeReconnectRecord {
+                snapshot: snapshot.clone(),
+            });
+            snapshot
+        };
+        drop(attempts);
+        emit_runtime_event(
+            self,
+            if snapshot.state == RuntimeReconnectAttemptState::Failed {
+                "reconnect.failed".to_string()
+            } else {
+                "reconnect.retry_scheduled".to_string()
+            },
+            RuntimeEventSubject {
+                kind: "peer".to_string(),
+                id: peer.to_string(),
+            },
+            json!({
+                "protocol": protocol.map(|protocol| protocol.as_str()),
+                "class": class_label(class),
+                "attempt_count": snapshot.attempt_count,
+                "next_attempt_unix_secs": snapshot.next_attempt_unix_secs,
+                "max_attempts": snapshot.max_attempts,
+                "reason": snapshot.reason
+            }),
+        );
+        Ok(snapshot)
+    }
+
+    fn clear_reconnect_attempt(
+        &self,
+        peer: &model::PeerId,
+        protocol: Option<&model::ProtocolId>,
+        class: model::TrafficClass,
+        outcome_reason: Option<String>,
+    ) -> Result<(), TransportError> {
+        let mut attempts = self
+            .reconnect_attempts
+            .write()
+            .expect("reconnect attempt registry should remain writable");
+        let removed = attempts
+            .iter()
+            .find(|entry| {
+                &entry.snapshot.peer == peer
+                    && entry.snapshot.protocol.as_ref() == protocol
+                    && entry.snapshot.class == class
+            })
+            .map(|entry| entry.snapshot.clone());
+        attempts.retain(|entry| {
+            !(&entry.snapshot.peer == peer
+                && entry.snapshot.protocol.as_ref() == protocol
+                && entry.snapshot.class == class)
+        });
+        drop(attempts);
+        if let Some(snapshot) = removed {
+            let event_type = outcome_reason
+                .as_deref()
+                .map(|reason| {
+                    if reason.contains("succeeded") || reason.contains("active") {
+                        "reconnect.succeeded"
+                    } else {
+                        "reconnect.cleared"
+                    }
+                })
+                .unwrap_or("reconnect.cleared");
+            emit_runtime_event(
+                self,
+                event_type.to_string(),
+                RuntimeEventSubject {
+                    kind: "peer".to_string(),
+                    id: peer.to_string(),
+                },
+                json!({
+                    "protocol": protocol.map(|protocol| protocol.as_str()),
+                    "class": class_label(class),
+                    "attempt_count": snapshot.attempt_count,
+                    "reason": outcome_reason
+                }),
+            );
+        }
+        Ok(())
+    }
+
+    fn record_runtime_event(
+        &self,
+        event_type: &str,
+        subject: RuntimeEventSubject,
+        details: serde_json::Value,
+    ) -> Result<(), TransportError> {
+        emit_runtime_event(self, event_type.to_string(), subject, details);
+        Ok(())
     }
 
     async fn migrate(
@@ -1170,9 +1373,61 @@ mod tests {
 
         assert_eq!(health.active_listeners, 1);
         assert_eq!(health.reconnect_state, RuntimeReconnectState::Suppressed);
+        assert_eq!(health.reconnect_attempt_count, 0);
         assert_eq!(health.reconnect_suppression_count, 1);
         assert!(health.listener_registry_healthy);
         assert!(health.session_registry_healthy);
+    }
+
+    #[tokio::test]
+    async fn adapter_tracks_reconnect_attempt_backoff_and_clear() {
+        let adapter = QuicTransportAdapter::default();
+        let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"reconnect-peer");
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+
+        let scheduled = adapter
+            .schedule_reconnect(
+                &peer,
+                Some(&protocol),
+                TrafficClass::Interactive,
+                "dial failed".to_string(),
+                4,
+                2,
+                32,
+            )
+            .expect("reconnect attempt should schedule");
+        assert_eq!(scheduled.attempt_count, 1);
+        assert_eq!(scheduled.state, RuntimeReconnectAttemptState::BackingOff);
+        assert!(scheduled.next_attempt_unix_secs >= scheduled.last_attempt_unix_secs + 2);
+
+        let health = adapter
+            .transport_health()
+            .expect("transport health should render");
+        assert_eq!(health.reconnect_state, RuntimeReconnectState::Active);
+        assert_eq!(health.reconnect_attempt_count, 1);
+        assert!(health.reconnect_next_attempt_unix_secs.is_some());
+
+        adapter
+            .clear_reconnect_attempt(
+                &peer,
+                Some(&protocol),
+                TrafficClass::Interactive,
+                Some("reconnect succeeded".to_string()),
+            )
+            .expect("reconnect attempt should clear");
+        let cleared = adapter
+            .transport_health()
+            .expect("cleared health should render");
+        assert_eq!(cleared.reconnect_state, RuntimeReconnectState::Idle);
+        assert_eq!(cleared.reconnect_attempt_count, 0);
+
+        let events = adapter.recent_events(16).expect("events should load");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "reconnect.retry_scheduled"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "reconnect.succeeded"));
     }
 
     #[tokio::test]

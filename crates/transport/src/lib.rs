@@ -172,10 +172,32 @@ pub struct RuntimeTransportHealth {
     pub active_sessions: usize,
     pub active_listeners: usize,
     pub reconnect_state: RuntimeReconnectState,
+    pub reconnect_attempt_count: usize,
+    pub reconnect_next_attempt_unix_secs: Option<u64>,
     pub reconnect_suppression_count: usize,
     pub event_buffer_depth: usize,
     pub session_registry_healthy: bool,
     pub listener_registry_healthy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeReconnectAttemptState {
+    BackingOff,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeReconnectAttempt {
+    pub peer: PeerId,
+    pub protocol: Option<ProtocolId>,
+    pub class: TrafficClass,
+    pub state: RuntimeReconnectAttemptState,
+    pub reason: String,
+    pub attempt_count: u32,
+    pub last_attempt_unix_secs: u64,
+    pub next_attempt_unix_secs: u64,
+    pub max_attempts: u32,
 }
 
 pub trait ConnectionHandle {
@@ -230,6 +252,34 @@ pub trait SessionLifecycleTransport: SecureTransport {
     fn active_listeners(&self) -> Result<Vec<RuntimeListenerSnapshot>, TransportError>;
 
     fn transport_health(&self) -> Result<RuntimeTransportHealth, TransportError>;
+
+    fn reconnect_attempts(&self) -> Result<Vec<RuntimeReconnectAttempt>, TransportError>;
+
+    fn schedule_reconnect(
+        &self,
+        peer: &PeerId,
+        protocol: Option<&ProtocolId>,
+        class: TrafficClass,
+        reason: String,
+        max_attempts: u32,
+        base_backoff_secs: u64,
+        max_backoff_secs: u64,
+    ) -> Result<RuntimeReconnectAttempt, TransportError>;
+
+    fn clear_reconnect_attempt(
+        &self,
+        peer: &PeerId,
+        protocol: Option<&ProtocolId>,
+        class: TrafficClass,
+        outcome_reason: Option<String>,
+    ) -> Result<(), TransportError>;
+
+    fn record_runtime_event(
+        &self,
+        event_type: &str,
+        subject: RuntimeEventSubject,
+        details: Value,
+    ) -> Result<(), TransportError>;
 
     async fn migrate(
         &self,

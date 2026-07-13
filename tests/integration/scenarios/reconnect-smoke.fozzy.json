@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "name": "reconnect-smoke",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quic", "adapter_tracks_reconnect_attempt_backoff_and_clear"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "runtime_health_reports_listener_and_suppression_state"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["run", "-p", "quip", "--", "runtime", "health"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["run", "-p", "quip", "--", "runtime", "events", "--limit", "8"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "event_id": "evt-1720000123000000000",
+  "event_type": "reconnect.retry_scheduled",
+  "emitted_at": "2026-07-13T07:54:30Z",
+  "truth_kind": "runtime",
+  "subject": {
+    "kind": "peer",
+    "id": "ed25519:reconnect-peer"
+  },
+  "details": {
+    "protocol": "/quicnet/control/1",
+    "class": "interactive",
+    "attempt_count": 2,
+    "next_attempt_unix_secs": 1720000123,
+    "max_attempts": 5,
+    "reason": "dial failed"
+  }
+}

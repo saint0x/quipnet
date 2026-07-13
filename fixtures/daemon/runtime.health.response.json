@@ -12,6 +12,8 @@
     "active_paths": 0,
     "active_listeners": 1,
     "reconnect_state": "suppressed",
+    "reconnect_attempt_count": 2,
+    "reconnect_next_attempt_unix_secs": 1720000123,
     "reconnect_suppression_count": 1,
     "runtime_event_buffer_depth": 12
   },

@@ -7,7 +7,7 @@ use crypto::IdentityKeypair;
 use membership::{CapabilityGrant, MembershipCertificate, RevocationRecord, RevocationTarget};
 use relaywire::{RelayAnnouncement, RelayMap};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use thiserror::Error;
 
 pub use discovery::{BootstrapHint, BootstrapIngestReport, DiscoveryService};
@@ -229,6 +229,8 @@ pub struct RuntimeHealthReport {
     pub active_paths: usize,
     pub active_listeners: usize,
     pub reconnect_state: RuntimeReconnectState,
+    pub reconnect_attempt_count: usize,
+    pub reconnect_next_attempt_unix_secs: Option<u64>,
     pub reconnect_suppression_count: usize,
     pub runtime_event_buffer_depth: usize,
 }
@@ -1520,6 +1522,8 @@ impl LocalControlPlane {
             active_paths,
             active_listeners: transport_health.active_listeners,
             reconnect_state: transport_health.reconnect_state,
+            reconnect_attempt_count: transport_health.reconnect_attempt_count,
+            reconnect_next_attempt_unix_secs: transport_health.reconnect_next_attempt_unix_secs,
             reconnect_suppression_count: transport_health.reconnect_suppression_count,
             runtime_event_buffer_depth: transport_health.event_buffer_depth,
         })
@@ -1533,6 +1537,16 @@ impl LocalControlPlane {
         T: SessionLifecycleTransport,
     {
         let state = self.ensure_state()?;
+        transport.record_runtime_event(
+            "authority.reevaluation_started",
+            RuntimeEventSubject {
+                kind: "authority".to_string(),
+                id: state.local_peer_id.to_string(),
+            },
+            json!({
+                "active_sessions": transport.active_sessions()?.len()
+            }),
+        )?;
         let sessions = transport.active_sessions()?;
         let local_policy_denied = state.deny_reason(&state.local_peer_id).is_some();
         let mut reevaluated_sessions = 0;
@@ -1580,13 +1594,28 @@ impl LocalControlPlane {
             }
         }
 
-        Ok(AuthorityReevaluationReport {
+        let report = AuthorityReevaluationReport {
             reevaluated_sessions,
             closed_sessions,
             unchanged_sessions,
             reconnect_suppressions_added,
             local_policy_denied,
-        })
+        };
+        transport.record_runtime_event(
+            "authority.reevaluation_completed",
+            RuntimeEventSubject {
+                kind: "authority".to_string(),
+                id: state.local_peer_id.to_string(),
+            },
+            json!({
+                "reevaluated_sessions": report.reevaluated_sessions,
+                "closed_sessions": report.closed_sessions,
+                "unchanged_sessions": report.unchanged_sessions,
+                "reconnect_suppressions_added": report.reconnect_suppressions_added,
+                "local_policy_denied": report.local_policy_denied
+            }),
+        )?;
+        Ok(report)
     }
 
     pub fn explain_policy(

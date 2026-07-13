@@ -912,7 +912,7 @@ fn emit_runtime_listeners(listeners: &RuntimeListenersListResult) {
 
 fn emit_runtime_health(health: &RuntimeHealthResult) {
     println!(
-        "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
+        "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_attempts={} reconnect_next_attempt_unix_secs={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
         health.daemon_readiness,
         health.authority_sync_health,
         health.runtime_registry_health,
@@ -922,6 +922,11 @@ fn emit_runtime_health(health: &RuntimeHealthResult) {
         health.active_paths,
         health.active_listeners,
         health.reconnect_state,
+        health.reconnect_attempt_count,
+        health
+            .reconnect_next_attempt_unix_secs
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         health.reconnect_suppression_count,
         health.runtime_event_buffer_depth,
         health.truth_kind
@@ -1480,12 +1485,14 @@ mod tests {
             active_paths: 0,
             active_listeners: 1,
             reconnect_state: "suppressed".to_string(),
+            reconnect_attempt_count: 2,
+            reconnect_next_attempt_unix_secs: Some(1_720_000_123),
             reconnect_suppression_count: 1,
             runtime_event_buffer_depth: 12,
         };
 
         let rendered = format!(
-            "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
+            "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_attempts={} reconnect_next_attempt_unix_secs={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
             health.daemon_readiness,
             health.authority_sync_health,
             health.runtime_registry_health,
@@ -1495,12 +1502,18 @@ mod tests {
             health.active_paths,
             health.active_listeners,
             health.reconnect_state,
+            health.reconnect_attempt_count,
+            health
+                .reconnect_next_attempt_unix_secs
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
             health.reconnect_suppression_count,
             health.runtime_event_buffer_depth,
             health.truth_kind
         );
 
         assert!(rendered.contains("daemon_readiness=suppressed"));
+        assert!(rendered.contains("reconnect_attempts=2"));
         assert!(rendered.contains("reconnect_suppressions=1"));
     }
 

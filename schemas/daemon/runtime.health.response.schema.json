@@ -19,6 +19,7 @@
             "active_paths",
             "active_listeners",
             "reconnect_state",
+            "reconnect_attempt_count",
             "reconnect_suppression_count",
             "runtime_event_buffer_depth"
           ],
@@ -50,6 +51,11 @@
             "reconnect_state": {
               "type": "string",
               "enum": ["idle", "active", "suppressed", "failed"]
+            },
+            "reconnect_attempt_count": { "type": "integer", "minimum": 0 },
+            "reconnect_next_attempt_unix_secs": {
+              "type": ["integer", "null"],
+              "minimum": 0
             },
             "reconnect_suppression_count": { "type": "integer", "minimum": 0 },
             "runtime_event_buffer_depth": { "type": "integer", "minimum": 0 }

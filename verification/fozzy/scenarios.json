@@ -116,7 +116,9 @@
       "checks": [
         "drop_detected",
         "retry_policy_visible",
-        "reconnect_outcome_visible"
+        "reconnect_outcome_visible",
+        "bounded_backoff_visible",
+        "runtime_health_reconnect_state_visible"
       ],
       "focus": ["reconnect", "drop_recovery", "runtime_policy"]
     },

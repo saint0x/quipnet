@@ -224,6 +224,8 @@ pub struct RuntimeHealthResult {
     pub active_paths: usize,
     pub active_listeners: usize,
     pub reconnect_state: String,
+    pub reconnect_attempt_count: usize,
+    pub reconnect_next_attempt_unix_secs: Option<u64>,
     pub reconnect_suppression_count: usize,
     pub runtime_event_buffer_depth: usize,
 }

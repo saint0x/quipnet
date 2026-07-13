@@ -15,6 +15,7 @@ use daemonapi::{
     SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
     SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
+use fabric::SessionLifecycleTransport;
 use fabric::{
     DaemonConfig, LocalControlPlane, PathSource, ProtocolId, RuntimeHealthLevel,
     RuntimePathAlternative, RuntimePathSnapshot, RuntimePathState, SessionSnapshot, TrafficClass,
@@ -102,6 +103,19 @@ struct DaemonCycleReport {
     reconcile_report: Option<fabric::SessionReconcileReport>,
     active_session: Option<SessionSnapshot>,
     connect_status: String,
+}
+
+const RECONNECT_MAX_ATTEMPTS: u32 = 5;
+const RECONNECT_BASE_BACKOFF_SECS: u64 = 5;
+const RECONNECT_MAX_BACKOFF_SECS: u64 = 300;
+
+#[derive(Debug)]
+enum TargetSessionOutcome {
+    Active(SessionSnapshot),
+    Reused(SessionSnapshot),
+    BackingOff(String),
+    Suppressed(String),
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,14 +335,14 @@ async fn run_cycle(
     let (active_session, connect_status) = match args.connect_protocol.as_deref() {
         Some(protocol) => {
             match ensure_target_session(args, control, &state, transport, protocol).await {
-                Ok(Some(session)) => {
+                Ok(TargetSessionOutcome::Active(session)) => {
                     state = control.ensure_state()?;
                     (Some(session), "active".to_string())
                 }
-                Ok(None) => {
-                    let existing = existing_target_session(args, &state, transport, protocol);
-                    (existing, "reused".to_string())
-                }
+                Ok(TargetSessionOutcome::Reused(session)) => (Some(session), "reused".to_string()),
+                Ok(TargetSessionOutcome::BackingOff(status)) => (None, status),
+                Ok(TargetSessionOutcome::Suppressed(status)) => (None, status),
+                Ok(TargetSessionOutcome::Failed(status)) => (None, status),
                 Err(error) => (None, format!("connect-failed:{error}")),
             }
         }
@@ -353,9 +367,16 @@ async fn ensure_target_session(
     state: &fabric::DaemonState,
     transport: &QuicTransportAdapter,
     protocol: &str,
-) -> Result<Option<SessionSnapshot>, fabric::DaemonStateError> {
+) -> Result<TargetSessionOutcome, fabric::DaemonStateError> {
     if let Some(session) = existing_target_session(args, state, transport, protocol) {
-        return Ok(Some(session));
+        let target_protocol = session.protocol.clone();
+        transport.clear_reconnect_attempt(
+            &session.peer,
+            target_protocol.as_ref(),
+            session.class,
+            Some("session already active".to_string()),
+        )?;
+        return Ok(TargetSessionOutcome::Reused(session));
     }
 
     let target = args
@@ -370,15 +391,104 @@ async fn ensure_target_session(
         })?;
     let protocol = ProtocolId::new(protocol)
         .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
-    let session = control
-        .realize_best_path(
+    let class = parse_class(&args.connect_class);
+    if let Some(suppression) = transport
+        .reconnect_suppressions()?
+        .into_iter()
+        .find(|entry| {
+            entry.peer == target
+                && entry.protocol.as_ref() == Some(&protocol)
+                && entry.class == class
+        })
+    {
+        transport.clear_reconnect_attempt(
             &target,
-            &protocol,
-            parse_class(&args.connect_class),
-            transport,
-        )
-        .await?;
-    Ok(Some(session))
+            Some(&protocol),
+            class,
+            Some("reconnect suppressed by policy".to_string()),
+        )?;
+        return Ok(TargetSessionOutcome::Suppressed(format!(
+            "suppressed:{}",
+            suppression.reason
+        )));
+    }
+
+    let now = current_unix_secs();
+    if let Some(attempt) = transport.reconnect_attempts()?.into_iter().find(|entry| {
+        entry.peer == target && entry.protocol.as_ref() == Some(&protocol) && entry.class == class
+    }) {
+        match attempt.state {
+            fabric::RuntimeReconnectAttemptState::Failed => {
+                return Ok(TargetSessionOutcome::Failed(format!(
+                    "failed:attempts={} reason={}",
+                    attempt.attempt_count, attempt.reason
+                )));
+            }
+            fabric::RuntimeReconnectAttemptState::BackingOff => {
+                if now < attempt.next_attempt_unix_secs {
+                    return Ok(TargetSessionOutcome::BackingOff(format!(
+                        "backoff:attempts={} next_retry_in={}s reason={}",
+                        attempt.attempt_count,
+                        attempt.next_attempt_unix_secs.saturating_sub(now),
+                        attempt.reason
+                    )));
+                }
+            }
+        }
+    }
+
+    transport.record_runtime_event(
+        "reconnect.started",
+        fabric::RuntimeEventSubject {
+            kind: "peer".to_string(),
+            id: target.to_string(),
+        },
+        json!({
+            "protocol": protocol.as_str(),
+            "class": class_label(class)
+        }),
+    )?;
+    match control
+        .realize_best_path(&target, &protocol, class, transport)
+        .await
+    {
+        Ok(session) => {
+            transport.clear_reconnect_attempt(
+                &target,
+                Some(&protocol),
+                class,
+                Some("reconnect succeeded".to_string()),
+            )?;
+            Ok(TargetSessionOutcome::Active(session))
+        }
+        Err(error) => {
+            let scheduled = transport.schedule_reconnect(
+                &target,
+                Some(&protocol),
+                class,
+                error.to_string(),
+                RECONNECT_MAX_ATTEMPTS,
+                RECONNECT_BASE_BACKOFF_SECS,
+                RECONNECT_MAX_BACKOFF_SECS,
+            )?;
+            Ok(match scheduled.state {
+                fabric::RuntimeReconnectAttemptState::BackingOff => {
+                    TargetSessionOutcome::BackingOff(format!(
+                        "backoff:attempts={} next_retry_in={}s reason={}",
+                        scheduled.attempt_count,
+                        scheduled.next_attempt_unix_secs.saturating_sub(now),
+                        scheduled.reason
+                    ))
+                }
+                fabric::RuntimeReconnectAttemptState::Failed => {
+                    TargetSessionOutcome::Failed(format!(
+                        "failed:attempts={} reason={}",
+                        scheduled.attempt_count, scheduled.reason
+                    ))
+                }
+            })
+        }
+    }
 }
 
 fn existing_target_session(
@@ -873,6 +983,8 @@ fn runtime_health_response(
                 active_paths: health.active_paths,
                 active_listeners: health.active_listeners,
                 reconnect_state: runtime_reconnect_state_label(&health.reconnect_state).to_string(),
+                reconnect_attempt_count: health.reconnect_attempt_count,
+                reconnect_next_attempt_unix_secs: health.reconnect_next_attempt_unix_secs,
                 reconnect_suppression_count: health.reconnect_suppression_count,
                 runtime_event_buffer_depth: health.runtime_event_buffer_depth,
             },
