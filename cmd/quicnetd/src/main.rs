@@ -53,6 +53,9 @@ struct Args {
     network_change_trigger_path: Option<String>,
 
     #[arg(long, default_value_t = false)]
+    force_network_reprobe: bool,
+
+    #[arg(long, default_value_t = false)]
     one_shot: bool,
 
     #[arg(long)]
@@ -68,6 +71,7 @@ struct Args {
 #[derive(Debug)]
 struct DaemonCycleReport {
     trigger: CycleTrigger,
+    reprobe_report: Option<fabric::NetcheckReprobeReport>,
     state: fabric::DaemonState,
     reconcile_report: Option<fabric::SessionReconcileReport>,
     active_session: Option<SessionSnapshot>,
@@ -111,7 +115,11 @@ async fn main() {
 
     initialize_state(&args, &control).expect("daemon state should persist");
     let mut trigger_monitor = DaemonTriggerMonitor::new(&args);
-    let mut trigger = CycleTrigger::Startup;
+    let mut trigger = if args.force_network_reprobe {
+        CycleTrigger::NetworkChangeRequested
+    } else {
+        CycleTrigger::Startup
+    };
 
     loop {
         let report = match run_cycle(&args, &control, trigger.clone()).await {
@@ -229,6 +237,11 @@ async fn run_cycle(
     control: &LocalControlPlane,
     trigger: CycleTrigger,
 ) -> Result<DaemonCycleReport, fabric::DaemonStateError> {
+    let reprobe_report = if trigger == CycleTrigger::NetworkChangeRequested {
+        Some(control.reprobe_network_change("network change trigger observed")?)
+    } else {
+        None
+    };
     let mut state = refresh_state(args, control)?;
     let reconcile_report = if args.disable_reconcile {
         None
@@ -272,6 +285,7 @@ async fn run_cycle(
 
     Ok(DaemonCycleReport {
         trigger,
+        reprobe_report,
         state,
         reconcile_report,
         active_session,
@@ -363,13 +377,18 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
         .map(|decision| decision.explanation.summary)
         .unwrap_or_else(|| "no routing candidates".to_string());
     println!(
-        "quicnetd active: {} selected_path={} active_session={} reconcile={} connect={} trigger={} state_path={}",
+        "quicnetd active: {} selected_path={} active_session={} reprobe={} reconcile={} connect={} trigger={} state_path={}",
         report.state.status_line(),
         selected_path,
         report
             .active_session
             .as_ref()
             .map(|session| format!("{}@{}", hex_session_id(&session.session_id), session.peer))
+            .unwrap_or_else(|| "none".to_string()),
+        report
+            .reprobe_report
+            .as_ref()
+            .map(reprobe_summary_line)
             .unwrap_or_else(|| "none".to_string()),
         report
             .reconcile_report
@@ -447,6 +466,17 @@ fn reconcile_summary_line(report: &fabric::SessionReconcileReport) -> String {
     format!(
         "examined={} upgraded={} closed={} unchanged={}",
         report.examined, report.upgraded, report.closed, report.unchanged
+    )
+}
+
+fn reprobe_summary_line(report: &fabric::NetcheckReprobeReport) -> String {
+    format!(
+        "udp={} ipv6={} relay_required={} probes={} paths={}",
+        report.udp_reachable,
+        report.ipv6_reachable,
+        report.relay_required,
+        report.probe_observations,
+        report.path_candidates
     )
 }
 
@@ -607,6 +637,7 @@ mod tests {
             reconcile_interval_seconds: 30,
             change_watch_interval_ms: 1000,
             network_change_trigger_path: None,
+            force_network_reprobe: false,
             one_shot: true,
             connect_protocol: None,
             connect_peer: None,

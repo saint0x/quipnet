@@ -119,6 +119,16 @@ pub struct StateSyncReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetcheckReprobeReport {
+    pub reason: String,
+    pub udp_reachable: bool,
+    pub ipv6_reachable: bool,
+    pub relay_required: bool,
+    pub probe_observations: usize,
+    pub path_candidates: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SessionReconcileDisposition {
     Unchanged,
     Upgraded,
@@ -715,6 +725,26 @@ impl LocalControlPlane {
         let state = self.ensure_state()?;
         state.save(&self.config.state_path)?;
         Ok(state)
+    }
+
+    pub fn reprobe_network_change(
+        &self,
+        reason: impl Into<String>,
+    ) -> Result<NetcheckReprobeReport, DaemonStateError> {
+        let mut state = self.ensure_state()?;
+        let reason = reason.into();
+        state.netcheck = reprobe_netcheck(&state, &reason);
+        state.path_candidates = merged_path_candidates(&state);
+        let report = NetcheckReprobeReport {
+            reason,
+            udp_reachable: state.netcheck.udp_reachable,
+            ipv6_reachable: state.netcheck.ipv6_reachable,
+            relay_required: state.netcheck.relay_required(),
+            probe_observations: state.netcheck.probe_observations.len(),
+            path_candidates: state.path_candidates.len(),
+        };
+        state.save(&self.config.state_path)?;
+        Ok(report)
     }
 
     pub fn seed_from_authority_snapshot(
@@ -1478,6 +1508,48 @@ fn relay_fallback_loss_pct(netcheck: &NetcheckReport) -> f32 {
 
 fn relay_fallback_throughput_mbps(relay: &RelayAnnouncement) -> u32 {
     (relay_direct_throughput_mbps(relay) / 2).max(80)
+}
+
+fn reprobe_netcheck(state: &DaemonState, reason: &str) -> NetcheckReport {
+    let mut netcheck = state.netcheck.clone();
+
+    if netcheck.port_mapped || netcheck.public_udp_addr.is_some() {
+        netcheck.udp_reachable = true;
+        if matches!(netcheck.nat_type, NatType::Unknown | NatType::UdpBlocked) {
+            netcheck.nat_type = NatType::RestrictedCone;
+        }
+    }
+
+    if netcheck
+        .public_udp_addr
+        .as_deref()
+        .is_some_and(is_ipv6_address)
+    {
+        netcheck.ipv6_reachable = true;
+    }
+
+    let status = if netcheck.udp_reachable || netcheck.ipv6_reachable {
+        ProbeStatus::Passed
+    } else {
+        ProbeStatus::Failed
+    };
+    let latency_ms = if status == ProbeStatus::Passed {
+        best_probe_latency_ms(&netcheck).or(Some(20))
+    } else {
+        None
+    };
+    netcheck.probe_observations.push(ProbeObservation {
+        vantage: "local-runtime".to_string(),
+        status,
+        latency_ms,
+        detail: format!("network change reprobe: {reason}"),
+    });
+    if netcheck.probe_observations.len() > 8 {
+        let drop_count = netcheck.probe_observations.len() - 8;
+        netcheck.probe_observations.drain(0..drop_count);
+    }
+
+    netcheck
 }
 
 fn relay_traffic_classes(values: &[String]) -> Vec<TrafficClass> {
@@ -2583,5 +2655,76 @@ mod tests {
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();
+    }
+
+    #[test]
+    fn reprobe_network_change_promotes_udp_when_local_public_addr_exists() {
+        let state_path = unique_state_path("quicnet-reprobe-public-addr-state");
+        let control = LocalControlPlane::new(DaemonConfig::new("reprobe-public-addr", &state_path));
+        let mut state = fixture_daemon_state("reprobe-public-addr");
+        state.netcheck.nat_type = NatType::UdpBlocked;
+        state.netcheck.udp_reachable = false;
+        state.netcheck.ipv6_reachable = false;
+        state.netcheck.public_udp_addr = Some("203.0.113.100:8443".to_string());
+        state.path_candidates.clear();
+        state.save(&state_path).expect("state should persist");
+
+        let report = control
+            .reprobe_network_change("network interface changed")
+            .expect("reprobe should persist");
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+
+        assert!(report.udp_reachable);
+        assert!(!report.relay_required);
+        assert_eq!(persisted.netcheck.udp_reachable, true);
+        assert_eq!(persisted.netcheck.nat_type, NatType::RestrictedCone);
+        assert!(persisted.path_candidates.iter().any(|candidate| {
+            matches!(
+                candidate.path_kind,
+                PathKind::DirectUdp | PathKind::DirectIpv6
+            )
+        }));
+        assert!(persisted
+            .netcheck
+            .probe_observations
+            .last()
+            .is_some_and(|observation| observation.detail.contains("network change reprobe")));
+
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn reprobe_network_change_records_failed_observation_without_udp_evidence() {
+        let state_path = unique_state_path("quicnet-reprobe-failed-state");
+        let control = LocalControlPlane::new(DaemonConfig::new("reprobe-failed", &state_path));
+        let mut state = fixture_daemon_state("reprobe-failed");
+        state.netcheck.nat_type = NatType::Unknown;
+        state.netcheck.udp_reachable = false;
+        state.netcheck.ipv6_reachable = false;
+        state.netcheck.public_udp_addr = None;
+        state.netcheck.port_mapped = false;
+        state.path_candidates.clear();
+        state.save(&state_path).expect("state should persist");
+
+        let report = control
+            .reprobe_network_change("carrier hop")
+            .expect("reprobe should persist");
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+
+        assert!(!report.udp_reachable);
+        assert!(report.relay_required);
+        assert_eq!(persisted.netcheck.udp_reachable, false);
+        assert!(persisted
+            .netcheck
+            .probe_observations
+            .last()
+            .is_some_and(|observation| observation.status == ProbeStatus::Failed));
+        assert!(persisted
+            .path_candidates
+            .iter()
+            .all(|candidate| candidate.path_kind == PathKind::Relay
+                || candidate.relay_peer.is_none()));
+
+        let _ = std::fs::remove_file(state_path);
     }
 }
