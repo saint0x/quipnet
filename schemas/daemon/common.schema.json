@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/common.schema.json",
+  "$defs": {
+    "truth_kind": {
+      "type": "string",
+      "enum": ["runtime", "durable", "runtime_and_durable"]
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "unauthorized",
+        "not_found",
+        "runtime_unavailable",
+        "stale_runtime_reference",
+        "policy_rejected",
+        "authority_mismatch",
+        "state_validation_failed",
+        "unsupported_operation",
+        "internal_error"
+      ]
+    },
+    "request_envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "operation", "auth", "payload"],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["local_socket_peer", "local_process", "test_harness"]
+            }
+          }
+        },
+        "payload": {
+          "type": "object"
+        }
+      }
+    },
+    "error_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "success_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "request_id", "result", "error"],
+      "properties": {
+        "ok": { "const": true },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "type": "object"
+        },
+        "error": {
+          "type": "null"
+        }
+      }
+    },
+    "error_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "request_id", "result", "error"],
+      "properties": {
+        "ok": { "const": false },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "type": "null"
+        },
+        "error": {
+          "$ref": "#/$defs/error_object"
+        }
+      }
+    },
+    "response_envelope": {
+      "oneOf": [
+        { "$ref": "#/$defs/success_response" },
+        { "$ref": "#/$defs/error_response" }
+      ]
+    }
+  }
+}

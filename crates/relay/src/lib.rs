@@ -126,7 +126,8 @@ impl RelayRuntime {
                 Ok(())
             }
             RelayFrame::SessionRejected(rejected) => {
-                self.sessions.remove(&pending_session_id(&rejected.attempt_id));
+                self.sessions
+                    .remove(&pending_session_id(&rejected.attempt_id));
                 Err(RelayError::Unauthorized)
             }
             RelayFrame::Data { session_id, .. } | RelayFrame::Health { session_id, .. } => {
@@ -179,7 +180,10 @@ impl RelayService {
                 reason: error.to_string(),
             });
         }
-        if !supports_traffic_class(&self.node.announcement.traffic_classes, request.traffic_class) {
+        if !supports_traffic_class(
+            &self.node.announcement.traffic_classes,
+            request.traffic_class,
+        ) {
             return Err(RelaySessionRejected {
                 attempt_id: request.attempt_id,
                 code: RelayRejectCode::UnsupportedTrafficClass,
@@ -190,7 +194,11 @@ impl RelayService {
                 reason: format!("relay does not support {:?} traffic", request.traffic_class),
             });
         }
-        if let Err(error) = authorize_destination(&self.node.destinations, &request.destination, request.protocol.as_ref()) {
+        if let Err(error) = authorize_destination(
+            &self.node.destinations,
+            &request.destination,
+            request.protocol.as_ref(),
+        ) {
             return Err(RelaySessionRejected {
                 attempt_id: request.attempt_id,
                 code: match error {
@@ -263,11 +271,16 @@ impl RelayService {
         Ok(accepted)
     }
 
-    pub fn close_session(&mut self, session_id: [u8; 16], reason: String) -> Result<(), RelayError> {
+    pub fn close_session(
+        &mut self,
+        session_id: [u8; 16],
+        reason: String,
+    ) -> Result<(), RelayError> {
         if self.runtime.session(&session_id).is_none() {
             return Err(RelayError::SessionNotFound);
         }
-        self.runtime.apply_frame(RelayFrame::Close { session_id, reason })
+        self.runtime
+            .apply_frame(RelayFrame::Close { session_id, reason })
     }
 
     pub fn session_count(&self) -> usize {
@@ -336,8 +349,8 @@ impl RelayControl for HttpRelayControl {
         session_id: [u8; 16],
         reason: &str,
     ) -> Result<(), RelayError> {
-        let payload =
-            serde_json::to_string(&json!({ "reason": reason })).expect("close request should serialize");
+        let payload = serde_json::to_string(&json!({ "reason": reason }))
+            .expect("close request should serialize");
         let response = relay_control_agent()
             .delete(&format!(
                 "{}/sessions/{}",
@@ -450,9 +463,7 @@ pub fn open_registered_session(
     let service = registry
         .get_mut(relay_peer)
         .ok_or_else(|| RelayError::Unavailable(relay_peer.clone()))?;
-    service
-        .open_session(request)
-        .map_err(map_rejected_to_error)
+    service.open_session(request).map_err(map_rejected_to_error)
 }
 
 pub fn registered_session_count(relay_peer: &PeerId) -> Option<usize> {
@@ -552,7 +563,11 @@ fn authorize_destination(
         .find(|candidate| &candidate.peer == destination)
         .ok_or_else(|| RelayError::DestinationUnauthorized(destination.clone()))?;
     if let Some(protocol) = protocol {
-        if !entry.protocols.iter().any(|candidate| candidate == protocol) {
+        if !entry
+            .protocols
+            .iter()
+            .any(|candidate| candidate == protocol)
+        {
             return Err(RelayError::DestinationProtocolRejected(destination.clone()));
         }
     }

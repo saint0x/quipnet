@@ -998,7 +998,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "quicnet"
+name = "quip"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -1012,7 +1012,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "quicnetd"
+name = "quipd"
 version = "0.1.0"
 dependencies = [
  "clap",

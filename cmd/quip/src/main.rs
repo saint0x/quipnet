@@ -14,13 +14,13 @@ struct Cli {
     #[arg(long, default_value = "personalcloud-prod")]
     network: String,
 
-    #[arg(long, default_value = "~/.quip/quicnet/state.json")]
+    #[arg(long, default_value = "~/.quip/net/state.json")]
     state_path: String,
 
-    #[arg(long, default_value = "~/.quip/quicnet/identity.json")]
+    #[arg(long, default_value = "~/.quip/identity/node.json")]
     identity_path: String,
 
-    #[arg(long, default_value = "QUICNET_IDENTITY_PASSPHRASE")]
+    #[arg(long, default_value = "QUIP_IDENTITY_PASSPHRASE")]
     identity_passphrase_env: String,
 
     #[command(subcommand)]
@@ -130,7 +130,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     ));
     match cli.command.unwrap_or(Command::Status) {
         Command::IdentityInit { overwrite } => {
-            let identity = init_identity(&cli.identity_path, &cli.identity_passphrase_env, overwrite)?;
+            let identity =
+                init_identity(&cli.identity_path, &cli.identity_passphrase_env, overwrite)?;
             println!(
                 "identity_path={} peer={} public_key_hex={}",
                 cli.identity_path,
@@ -152,8 +153,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
             authority_origin,
             authority_subject,
         } => {
-            let state =
-                control.seed_from_authority_origin(&authority_origin, authority_subject.as_deref())?;
+            let state = control
+                .seed_from_authority_origin(&authority_origin, authority_subject.as_deref())?;
             println!(
                 "joined network={} local_peer={} bootstrap={} state_path={} authority_origin={} authority_subject={}",
                 state.network,
@@ -393,7 +394,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let sessions = control.session_snapshots()?;
             let session_id = resolve_session_id(session.as_deref(), &sessions)?;
             return Err(runtime_session_cli_error(format!(
-                "session-close requires a daemon-owned runtime session registry; cached session {} cannot be closed from a standalone quicnet process",
+                "session-close requires a daemon-owned runtime session registry; cached session {} cannot be closed from a standalone quip process",
                 hex_session_id(&session_id)
             ))
             .into());
@@ -402,14 +403,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let sessions = control.session_snapshots()?;
             let session_id = resolve_session_id(session.as_deref(), &sessions)?;
             return Err(runtime_session_cli_error(format!(
-                "session-upgrade requires a daemon-owned runtime session registry; cached session {} cannot be upgraded from a standalone quicnet process",
+                "session-upgrade requires a daemon-owned runtime session registry; cached session {} cannot be upgraded from a standalone quip process",
                 hex_session_id(&session_id)
             ))
             .into());
         }
         Command::SessionReconcile => {
             return Err(runtime_session_cli_error(
-                "session-reconcile requires a daemon-owned runtime session registry and cannot run from a standalone quicnet process",
+                "session-reconcile requires a daemon-owned runtime session registry and cannot run from a standalone quip process",
             )
             .into());
         }
@@ -449,7 +450,9 @@ fn class_label(class: TrafficClass) -> &'static str {
 fn resolve_peer(peer: Option<&str>, state: &fabric::DaemonState) -> Result<PeerId, std::io::Error> {
     peer.and_then(|value| value.parse().ok())
         .or_else(|| state.first_peer().map(|entry| entry.snapshot.peer.clone()))
-        .ok_or_else(|| usage_error("a peer is required or daemon state must contain at least one peer"))
+        .ok_or_else(|| {
+            usage_error("a peer is required or daemon state must contain at least one peer")
+        })
 }
 
 fn render_path_snapshot(
@@ -546,9 +549,15 @@ fn parse_hex_session_id(value: &str) -> Result<[u8; 16], std::io::Error> {
     Ok(session_id)
 }
 
-fn load_identity(identity_path: &str, passphrase_env: &str) -> Result<IdentityKeypair, Box<dyn Error>> {
-    let passphrase = std::env::var(passphrase_env)
-        .map_err(|_| usage_error(format!("identity passphrase env var {passphrase_env} must be set")))?;
+fn load_identity(
+    identity_path: &str,
+    passphrase_env: &str,
+) -> Result<IdentityKeypair, Box<dyn Error>> {
+    let passphrase = std::env::var(passphrase_env).map_err(|_| {
+        usage_error(format!(
+            "identity passphrase env var {passphrase_env} must be set"
+        ))
+    })?;
     FileKeystore::new(identity_path)
         .load(&passphrase)
         .map_err(Into::into)
@@ -565,15 +574,16 @@ fn init_identity(
         )
         .into());
     }
-    let passphrase = std::env::var(passphrase_env)
-        .map_err(|_| usage_error(format!("identity passphrase env var {passphrase_env} must be set")))?;
+    let passphrase = std::env::var(passphrase_env).map_err(|_| {
+        usage_error(format!(
+            "identity passphrase env var {passphrase_env} must be set"
+        ))
+    })?;
     if let Some(parent) = Path::new(identity_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
     let identity = IdentityKeypair::generate(&mut OsRng);
-    FileKeystore::new(identity_path)
-        .store(&identity, &passphrase)
-        ?;
+    FileKeystore::new(identity_path).store(&identity, &passphrase)?;
     Ok(identity)
 }
 
@@ -660,9 +670,7 @@ mod tests {
     fn parse_hex_session_id_rejects_invalid_length() {
         let error = parse_hex_session_id("abcd").expect_err("invalid length should fail");
 
-        assert!(error
-            .to_string()
-            .contains("32 hex characters"));
+        assert!(error.to_string().contains("32 hex characters"));
     }
 
     #[test]
@@ -691,13 +699,13 @@ mod tests {
             std::env::set_var("HOME", "/tmp/quip-home");
         }
 
-        let expanded = expand_home_path("~/.quip/quicnet/state.json");
+        let expanded = expand_home_path("~/.quip/net/state.json");
 
         match original {
             Some(home) => unsafe { std::env::set_var("HOME", home) },
             None => unsafe { std::env::remove_var("HOME") },
         }
 
-        assert_eq!(expanded, "/tmp/quip-home/.quip/quicnet/state.json");
+        assert_eq!(expanded, "/tmp/quip-home/.quip/net/state.json");
     }
 }

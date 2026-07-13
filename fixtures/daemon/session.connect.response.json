@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "request_id": "req-2000",
+  "result": {
+    "truth_kind": "runtime",
+    "session": {
+      "session_id": "sess-0100",
+      "state": "connecting",
+      "initial_path_class": "direct"
+    }
+  },
+  "error": null
+}

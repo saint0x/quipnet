@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "network": {
+    "id": "personalcloud-prod",
+    "authority": {
+      "origin": "https://authority.quip.example",
+      "subject": "authority-root"
+    }
+  },
+  "authority_state": {
+    "last_accepted_revision": "rev-0042",
+    "last_sync_at": "2026-07-13T15:04:05Z",
+    "membership": {
+      "local_node_status": "active",
+      "accepted_groups": ["core", "relay-eligible"]
+    },
+    "capabilities": {
+      "local": ["connect", "relay", "sync"]
+    },
+    "revocations": {
+      "known_revisions": ["rev-0038", "rev-0040"]
+    }
+  },
+  "peers": {
+    "peer-001": {
+      "last_seen_identity": "peer-001",
+      "relationship": "known",
+      "topology": {
+        "last_reachable_at": "2026-07-13T14:00:00Z",
+        "reachability_class": "direct_or_relay"
+      }
+    }
+  },
+  "path_history": {
+    "peer-001": {
+      "preferred_path_class": "direct",
+      "last_successful_path_class": "relay",
+      "observations": [
+        {
+          "at": "2026-07-13T14:00:00Z",
+          "path_class": "relay",
+          "outcome": "success"
+        }
+      ]
+    }
+  },
+  "recovery": {
+    "last_clean_checkpoint_at": "2026-07-13T15:00:00Z",
+    "integrity_state": "clean"
+  }
+}

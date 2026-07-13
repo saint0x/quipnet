@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "requires": {
+    "deterministic_doctor": {
+      "enabled": true,
+      "runs": 5,
+      "strict": true
+    },
+    "deterministic_test": {
+      "enabled": true,
+      "strict": true
+    },
+    "recorded_traces": {
+      "enabled": true,
+      "source": "./traces.json"
+    },
+    "host_backed_runs": {
+      "enabled": true,
+      "required_when_feasible": true,
+      "backends": ["proc", "fs", "http"]
+    }
+  },
+  "failure_classes": [
+    "schema_failure",
+    "authority_failure",
+    "runtime_ownership_failure",
+    "reconnect_or_path_failure",
+    "operator_surface_failure",
+    "deployment_contract_failure"
+  ],
+  "ship_rule": "no_production_release_when_any_required_check_is_missing_or_failing"
+}

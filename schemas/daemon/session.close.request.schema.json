@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/session.close.request.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/request_envelope" },
+    {
+      "properties": {
+        "operation": { "const": "session.close" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session_id"],
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "operator_requested",
+                "policy_denied",
+                "shutdown",
+                "diagnostic"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

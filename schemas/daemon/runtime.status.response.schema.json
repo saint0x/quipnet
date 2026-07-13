@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/runtime.status.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "truth_kind",
+            "daemon_health",
+            "identity",
+            "durable_state",
+            "authority",
+            "runtime_summary"
+          ],
+          "properties": {
+            "truth_kind": {
+              "$ref": "./common.schema.json#/$defs/truth_kind"
+            },
+            "daemon_health": {
+              "type": "string",
+              "enum": ["ready", "degraded", "failed", "starting"]
+            },
+            "identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "path", "node_id"],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["loaded", "missing", "invalid"]
+                },
+                "path": { "type": "string", "minLength": 1 },
+                "node_id": { "type": "string", "minLength": 1 }
+              }
+            },
+            "durable_state": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "path", "schema_version"],
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["loaded", "missing", "invalid"]
+                },
+                "path": { "type": "string", "minLength": 1 },
+                "schema_version": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "authority": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sync_status", "last_accepted_revision"],
+              "properties": {
+                "sync_status": {
+                  "type": "string",
+                  "enum": ["in_sync", "syncing", "stale", "failed"]
+                },
+                "last_accepted_revision": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "runtime_summary": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["session_count", "active_path_count", "reconnect_state"],
+              "properties": {
+                "session_count": { "type": "integer", "minimum": 0 },
+                "active_path_count": { "type": "integer", "minimum": 0 },
+                "reconnect_state": {
+                  "type": "string",
+                  "enum": ["idle", "active", "suppressed", "failed"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

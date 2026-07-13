@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "request_id": "req-3000",
+  "result": {
+    "truth_kind": "runtime_and_durable",
+    "configured_authority": {
+      "origin": "https://authority.quip.example",
+      "subject": "authority-root"
+    },
+    "accepted_authority": {
+      "last_accepted_revision": "rev-0042",
+      "last_sync_status": "in_sync"
+    }
+  },
+  "error": null
+}

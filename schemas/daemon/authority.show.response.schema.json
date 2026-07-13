@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/authority.show.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["truth_kind", "configured_authority", "accepted_authority"],
+          "properties": {
+            "truth_kind": { "const": "runtime_and_durable" },
+            "configured_authority": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["origin"],
+              "properties": {
+                "origin": { "type": "string", "minLength": 1 },
+                "subject": { "type": "string", "minLength": 1 }
+              }
+            },
+            "accepted_authority": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["last_accepted_revision", "last_sync_status"],
+              "properties": {
+                "last_accepted_revision": { "type": "string", "minLength": 1 },
+                "last_sync_status": {
+                  "type": "string",
+                  "enum": ["in_sync", "syncing", "stale", "failed"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

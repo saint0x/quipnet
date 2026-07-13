@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/session.connect.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["truth_kind", "session"],
+          "properties": {
+            "truth_kind": { "const": "runtime" },
+            "session": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["session_id", "state", "initial_path_class"],
+              "properties": {
+                "session_id": { "type": "string", "minLength": 1 },
+                "state": {
+                  "type": "string",
+                  "enum": ["pending", "connecting", "active", "degraded", "failed"]
+                },
+                "initial_path_class": {
+                  "type": "string",
+                  "enum": ["direct", "relay", "unknown"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

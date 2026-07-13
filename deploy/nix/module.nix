@@ -1,23 +1,23 @@
 { lib, pkgs, config, ... }:
 let
-  cfg = config.services.quicnet;
-  quicnetdPackage = pkgs.rustPlatform.buildRustPackage {
-    pname = "quicnetd";
+  cfg = config.services.quip;
+  quipdPackage = pkgs.rustPlatform.buildRustPackage {
+    pname = "quipd";
     version = "0.1.0";
     src = builtins.path {
       path = ../..;
-      name = "quicnet-source";
+      name = "quip-source";
     };
     cargoLock.lockFile = ../../Cargo.lock;
-    cargoBuildFlags = [ "-p" "quicnetd" ];
+    cargoBuildFlags = [ "-p" "quipd" ];
   };
 in
 {
-  options.services.quicnet = {
-    enable = lib.mkEnableOption "Quicnet daemon";
+  options.services.quip = {
+    enable = lib.mkEnableOption "Quip daemon";
     package = lib.mkOption {
       type = lib.types.package;
-      default = quicnetdPackage;
+      default = quipdPackage;
     };
     network = lib.mkOption {
       type = lib.types.str;
@@ -25,15 +25,15 @@ in
     };
     statePath = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/quicnet/.quip/quicnet/state.json";
+      default = "/var/lib/quip/.quip/net/state.json";
     };
     identityPath = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/quicnet/.quip/quicnet/identity.json";
+      default = "/var/lib/quip/.quip/identity/node.json";
     };
     identityPassphraseEnvironmentVariable = lib.mkOption {
       type = lib.types.str;
-      default = "QUICNET_IDENTITY_PASSPHRASE";
+      default = "QUIP_IDENTITY_PASSPHRASE";
     };
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
@@ -58,20 +58,20 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    users.users.quicnet = {
+    users.users.quip = {
       isSystemUser = true;
-      group = "quicnet";
-      home = "/var/lib/quicnet";
+      group = "quip";
+      home = "/var/lib/quip";
       createHome = true;
     };
 
-    users.groups.quicnet = {};
+    users.groups.quip = {};
 
-    systemd.services.quicnet = {
-      description = "Quicnet daemon";
-      wantedBy = ["multi-user.target"];
-      after = ["network-online.target"];
-      wants = ["network-online.target"];
+    systemd.services.quip = {
+      description = "Quip daemon";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
       serviceConfig = {
         ExecStart = ''
           ${pkgs.bash}/bin/sh -ec '
@@ -84,10 +84,10 @@ in
           '
         '';
         DynamicUser = false;
-        User = "quicnet";
-        Group = "quicnet";
+        User = "quip";
+        Group = "quip";
         Restart = "on-failure";
-        StateDirectory = "quicnet";
+        StateDirectory = "quip";
       };
       environmentFiles = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
     };

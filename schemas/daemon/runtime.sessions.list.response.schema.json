@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/runtime.sessions.list.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["truth_kind", "sessions"],
+          "properties": {
+            "truth_kind": {
+              "const": "runtime"
+            },
+            "sessions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id",
+                  "peer_id",
+                  "state",
+                  "active_path_class",
+                  "age_seconds",
+                  "last_activity_seconds"
+                ],
+                "properties": {
+                  "session_id": { "type": "string", "minLength": 1 },
+                  "peer_id": { "type": "string", "minLength": 1 },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "connecting",
+                      "active",
+                      "degraded",
+                      "migrating",
+                      "reconciling",
+                      "closing",
+                      "closed",
+                      "failed"
+                    ]
+                  },
+                  "active_path_class": {
+                    "type": "string",
+                    "enum": ["direct", "relay", "unknown"]
+                  },
+                  "age_seconds": { "type": "integer", "minimum": 0 },
+                  "last_activity_seconds": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

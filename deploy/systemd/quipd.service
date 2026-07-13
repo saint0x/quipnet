@@ -1,0 +1,42 @@
+[Unit]
+Description=Quip node daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quip
+Group=quip
+Environment=QUIP_NETWORK=personalcloud-prod
+Environment=QUIP_STATE_PATH=/var/lib/quip/.quip/net/state.json
+Environment=QUIP_IDENTITY_PATH=/var/lib/quip/.quip/identity/node.json
+Environment=QUIP_IDENTITY_PASSPHRASE_ENV=QUIP_IDENTITY_PASSPHRASE
+Environment=QUIP_SYNC=true
+Environment=QUIP_REVOCATION_SYNC=true
+EnvironmentFile=-/etc/quip/quipd.env
+ExecStart=/bin/sh -ec 'set -- --network "$QUIP_NETWORK" --state-path "$QUIP_STATE_PATH" --identity-path "$QUIP_IDENTITY_PATH" --identity-passphrase-env "$QUIP_IDENTITY_PASSPHRASE_ENV"; if [ "${QUIP_SYNC}" = "true" ]; then set -- "$@" --sync; fi; if [ "${QUIP_REVOCATION_SYNC}" = "true" ]; then set -- "$@" --revocation-sync; fi; if [ -n "${QUIP_AUTHORITY_ORIGIN:-}" ]; then set -- "$@" --authority-origin "$QUIP_AUTHORITY_ORIGIN"; fi; if [ -n "${QUIP_AUTHORITY_SUBJECT:-}" ]; then set -- "$@" --authority-subject "$QUIP_AUTHORITY_SUBJECT"; fi; if [ -n "${QUIP_AUTHORITY_SNAPSHOT:-}" ]; then set -- "$@" --authority-snapshot "$QUIP_AUTHORITY_SNAPSHOT"; fi; exec /usr/local/bin/quipd "$@"'
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=quip
+StateDirectory=quip
+CacheDirectory=quip
+WorkingDirectory=/var/lib/quip/.quip
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+LimitNOFILE=1048576
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

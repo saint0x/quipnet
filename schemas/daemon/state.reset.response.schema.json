@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/state.reset.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "truth_kind",
+            "identity_preserved",
+            "network_state_reset",
+            "next_action"
+          ],
+          "properties": {
+            "truth_kind": { "const": "durable" },
+            "identity_preserved": { "type": "boolean", "const": true },
+            "network_state_reset": { "type": "boolean", "const": true },
+            "next_action": {
+              "type": "string",
+              "enum": ["bootstrap_required", "daemon_restart_required"]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

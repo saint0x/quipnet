@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/state/state.schema.json",
+  "title": "Quip Durable Network State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "network",
+    "authority_state",
+    "peers",
+    "path_history",
+    "recovery"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "authority"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["origin"],
+          "properties": {
+            "origin": {
+              "type": "string",
+              "minLength": 1
+            },
+            "subject": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "authority_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "last_accepted_revision",
+        "last_sync_at",
+        "membership",
+        "capabilities",
+        "revocations"
+      ],
+      "properties": {
+        "last_accepted_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "last_sync_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "membership": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["local_node_status", "accepted_groups"],
+          "properties": {
+            "local_node_status": {
+              "type": "string",
+              "enum": ["active", "inactive", "revoked", "unknown"]
+            },
+            "accepted_groups": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["local"],
+          "properties": {
+            "local": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        },
+        "revocations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["known_revisions"],
+          "properties": {
+            "known_revisions": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+    "peers": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["last_seen_identity", "relationship", "topology"],
+        "properties": {
+          "last_seen_identity": {
+            "type": "string",
+            "minLength": 1
+          },
+          "relationship": {
+            "type": "string",
+            "enum": ["known", "trusted", "restricted", "unknown"]
+          },
+          "topology": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["last_reachable_at", "reachability_class"],
+            "properties": {
+              "last_reachable_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "reachability_class": {
+                "type": "string",
+                "enum": ["direct", "relay", "direct_or_relay", "unknown"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "path_history": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "preferred_path_class",
+          "last_successful_path_class",
+          "observations"
+        ],
+        "properties": {
+          "preferred_path_class": {
+            "type": "string",
+            "enum": ["direct", "relay", "unknown"]
+          },
+          "last_successful_path_class": {
+            "type": "string",
+            "enum": ["direct", "relay", "unknown"]
+          },
+          "observations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["at", "path_class", "outcome"],
+              "properties": {
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "path_class": {
+                  "type": "string",
+                  "enum": ["direct", "relay", "unknown"]
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": ["success", "failure", "degraded"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["last_clean_checkpoint_at", "integrity_state"],
+      "properties": {
+        "last_clean_checkpoint_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "integrity_state": {
+          "type": "string",
+          "enum": ["clean", "recovering", "corrupt"]
+        }
+      }
+    }
+  }
+}

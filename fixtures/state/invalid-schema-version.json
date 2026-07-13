@@ -1,0 +1,29 @@
+{
+  "schema_version": 99,
+  "network": {
+    "id": "personalcloud-prod",
+    "authority": {
+      "origin": "https://authority.quip.example"
+    }
+  },
+  "authority_state": {
+    "last_accepted_revision": "rev-0042",
+    "last_sync_at": "2026-07-13T15:04:05Z",
+    "membership": {
+      "local_node_status": "active",
+      "accepted_groups": ["core"]
+    },
+    "capabilities": {
+      "local": ["connect"]
+    },
+    "revocations": {
+      "known_revisions": ["rev-0040"]
+    }
+  },
+  "peers": {},
+  "path_history": {},
+  "recovery": {
+    "last_clean_checkpoint_at": "2026-07-13T15:00:00Z",
+    "integrity_state": "clean"
+  }
+}

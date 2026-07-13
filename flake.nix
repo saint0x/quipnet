@@ -1,5 +1,5 @@
 {
-  description = "Quicnet delivery infrastructure shell and validation checks";
+  description = "Quip delivery infrastructure shell and validation checks";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
@@ -25,7 +25,7 @@
 
         formatter = pkgs.nixpkgs-fmt;
 
-        checks.deploy = pkgs.runCommand "quicnet-deploy-check" {
+        checks.deploy = pkgs.runCommand "quip-deploy-check" {
           nativeBuildInputs = [ pkgs.ripgrep ];
         } ''
           cd ${self}

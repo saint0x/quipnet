@@ -245,8 +245,10 @@ fn init(args: InitArgs) {
 
 fn add_member(args: AddMemberArgs) {
     let authority = seeded_keypair(&format!("authority:{}", args.realm));
-    let (subject_label, subject_peer_id) =
-        resolve_subject(args.subject_seed.as_deref(), args.subject_peer_id.as_deref());
+    let (subject_label, subject_peer_id) = resolve_subject(
+        args.subject_seed.as_deref(),
+        args.subject_peer_id.as_deref(),
+    );
     let issued_at = current_unix_secs();
     let membership = MembershipCertificate::issue(
         &authority,
@@ -374,8 +376,10 @@ fn issue(args: IssueArgs) {
         }
         ArtifactCommand::Membership(args) => {
             let authority = seeded_keypair(&format!("authority:{}", args.realm));
-            let (subject_label, subject_peer_id) =
-                resolve_subject(args.subject_seed.as_deref(), args.subject_peer_id.as_deref());
+            let (subject_label, subject_peer_id) = resolve_subject(
+                args.subject_seed.as_deref(),
+                args.subject_peer_id.as_deref(),
+            );
             let issued_at = current_unix_secs();
             IssuedArtifact::Membership {
                 subject_seed: subject_label,
@@ -392,8 +396,10 @@ fn issue(args: IssueArgs) {
         }
         ArtifactCommand::Capability(args) => {
             let authority = seeded_keypair(&format!("authority:{}", args.realm));
-            let (_, subject_peer_id) =
-                resolve_subject(args.subject_seed.as_deref(), args.subject_peer_id.as_deref());
+            let (_, subject_peer_id) = resolve_subject(
+                args.subject_seed.as_deref(),
+                args.subject_peer_id.as_deref(),
+            );
             let issued_at = current_unix_secs();
             let sequence = next_capability_sequence(persisted_state_path.as_deref());
             IssuedArtifact::Capability(CapabilityGrant::issue(
@@ -538,7 +544,8 @@ fn resolve_subject(subject_seed: Option<&str>, subject_peer_id: Option<&str>) ->
             .unwrap_or_else(|| format!("peer:{peer_id}"));
         (label, peer_id)
     } else {
-        let seed = subject_seed.expect("either --subject-seed or --subject-peer-id must be supplied");
+        let seed =
+            subject_seed.expect("either --subject-seed or --subject-peer-id must be supplied");
         let subject = seeded_keypair(&format!("subject:{seed}"));
         (seed.to_string(), subject.peer_id())
     }

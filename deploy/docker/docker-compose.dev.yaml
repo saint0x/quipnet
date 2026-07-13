@@ -1,24 +1,24 @@
 services:
-  quicnetd:
+  quipd:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
-    image: quicnetd:dev
+    image: quipd:dev
     environment:
-      QUICNET_NETWORK: personalcloud-prod
-      QUICNET_STATE_PATH: /home/quicnet/.quip/quicnet/state.json
-      QUICNET_IDENTITY_PATH: /home/quicnet/.quip/quicnet/identity.json
-      QUICNET_IDENTITY_PASSPHRASE_ENV: QUICNET_IDENTITY_PASSPHRASE
-      QUICNET_IDENTITY_PASSPHRASE: change-me-for-dev
-      QUICNET_AUTHORITY_ORIGIN: http://authority:8080
-      QUICNET_SYNC: "true"
-      QUICNET_REVOCATION_SYNC: "true"
+      QUIP_NETWORK: personalcloud-prod
+      QUIP_STATE_PATH: /home/quip/.quip/net/state.json
+      QUIP_IDENTITY_PATH: /home/quip/.quip/identity/node.json
+      QUIP_IDENTITY_PASSPHRASE_ENV: QUIP_IDENTITY_PASSPHRASE
+      QUIP_IDENTITY_PASSPHRASE: change-me-for-dev
+      QUIP_AUTHORITY_ORIGIN: http://authority:8080
+      QUIP_SYNC: "true"
+      QUIP_REVOCATION_SYNC: "true"
     ports:
       - "4433:4433/udp"
     volumes:
-      - quicnet-data:/home/quicnet/.quip/quicnet
+      - quip-data:/home/quip/.quip
     healthcheck:
-      test: ["CMD", "/usr/local/bin/quicnet", "--network", "personalcloud-prod", "--state-path", "/home/quicnet/.quip/quicnet/state.json", "status"]
+      test: ["CMD", "/usr/local/bin/quip", "--network", "personalcloud-prod", "--state-path", "/home/quip/.quip/net/state.json", "status"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -26,15 +26,15 @@ services:
     profiles: ["dev"]
 
   relay:
-    image: quicnetd:dev
+    image: quipd:dev
     entrypoint: ["/usr/local/bin/relay"]
     command: ["--region", "local", "--max-bandwidth-mbps", "9000"]
     depends_on:
-      quicnetd:
+      quipd:
         condition: service_healthy
     ports:
       - "5443:4433/udp"
     restart: unless-stopped
 
 volumes:
-  quicnet-data:
+  quip-data:

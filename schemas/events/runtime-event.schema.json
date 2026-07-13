@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/events/runtime-event.schema.json",
+  "title": "Quip Runtime Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "emitted_at",
+    "truth_kind",
+    "subject",
+    "details"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "session.created",
+        "session.state_changed",
+        "session.closing",
+        "session.closed",
+        "session.failed",
+        "path.selected",
+        "path.degraded",
+        "path.migration_started",
+        "path.migration_completed",
+        "path.failed",
+        "path.suppressed",
+        "reconnect.started",
+        "reconnect.retry_scheduled",
+        "reconnect.succeeded",
+        "reconnect.suppressed",
+        "reconnect.failed",
+        "authority.sync_started",
+        "authority.sync_completed",
+        "authority.sync_failed",
+        "authority.reevaluation_started",
+        "authority.reevaluation_completed",
+        "authority.policy_enforced"
+      ]
+    },
+    "emitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "truth_kind": {
+      "type": "string",
+      "const": "runtime"
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["session", "peer", "authority", "path", "runtime"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "details": {
+      "type": "object"
+    }
+  }
+}

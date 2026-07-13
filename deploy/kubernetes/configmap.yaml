@@ -1,14 +1,14 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: quicnet-config
-  namespace: quicnet-system
+  name: quip-config
+  namespace: quip-system
 data:
-  QUICNET_NETWORK: personalcloud-prod
-  QUICNET_STATE_PATH: /home/quicnet/.quip/quicnet/state.json
-  QUICNET_IDENTITY_PATH: /home/quicnet/.quip/quicnet/identity.json
-  QUICNET_IDENTITY_PASSPHRASE_ENV: QUICNET_IDENTITY_PASSPHRASE
-  QUICNET_AUTHORITY_ORIGIN: https://authority.quipnet.example
-  QUICNET_AUTHORITY_SUBJECT: ""
-  QUICNET_SYNC: "true"
-  QUICNET_REVOCATION_SYNC: "true"
+  QUIP_NETWORK: personalcloud-prod
+  QUIP_STATE_PATH: /home/quip/.quip/net/state.json
+  QUIP_IDENTITY_PATH: /home/quip/.quip/identity/node.json
+  QUIP_IDENTITY_PASSPHRASE_ENV: QUIP_IDENTITY_PASSPHRASE
+  QUIP_AUTHORITY_ORIGIN: https://authority.quip.example
+  QUIP_AUTHORITY_SUBJECT: ""
+  QUIP_SYNC: "true"
+  QUIP_REVOCATION_SYNC: "true"

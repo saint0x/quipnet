@@ -4,7 +4,6 @@ sbom = "spdx-json"
 reproducibility = "source-tarball"
 
 [artifacts]
-source_bundle = "dist/quicnet-source.tar.gz"
-checksums = "release/artifacts/quicnet-source.sha256"
-sbom = "release/sbom/quicnet-source.spdx.json"
-
+source_bundle = "dist/quip-source.tar.gz"
+checksums = "release/artifacts/quip-source.sha256"
+sbom = "release/sbom/quip-source.spdx.json"

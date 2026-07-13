@@ -21,8 +21,8 @@ members = [
     "crates/fabric",
     "crates/ffi",
     "crates/testkit",
-    "cmd/quicnetd",
-    "cmd/quicnet",
+    "cmd/quipd",
+    "cmd/quip",
     "cmd/relay",
     "cmd/bootstrap",
     "cmd/authority",
@@ -35,7 +35,7 @@ edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.81"
 version = "0.1.0"
-authors = ["Quipnet Contributors"]
+authors = ["Quip Contributors"]
 repository = "https://github.com/saint0x/quipnet"
 
 [workspace.dependencies]

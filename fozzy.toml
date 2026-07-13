@@ -1,7 +1,7 @@
 base_dir = ".fozzy"
 
 [package]
-name = "quicnet-local"
+name = "quip-local"
 version = "0.1.0"
 
 [[target.bin]]

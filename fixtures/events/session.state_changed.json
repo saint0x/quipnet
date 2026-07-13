@@ -1,0 +1,15 @@
+{
+  "event_id": "evt-0001",
+  "event_type": "session.state_changed",
+  "emitted_at": "2026-07-13T15:06:00Z",
+  "truth_kind": "runtime",
+  "subject": {
+    "kind": "session",
+    "id": "sess-0100"
+  },
+  "details": {
+    "peer_id": "peer-003",
+    "prior_state": "connecting",
+    "next_state": "active"
+  }
+}

@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: quicnet-state
-  namespace: quicnet-system
+  name: quip-state
+  namespace: quip-system
 spec:
   accessModes:
     - ReadWriteOnce

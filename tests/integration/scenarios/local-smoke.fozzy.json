@@ -23,7 +23,7 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
-      "args": ["run", "-p", "quicnet", "--", "status"],
+      "args": ["run", "-p", "quip", "--", "status"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",
@@ -32,7 +32,7 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
-      "args": ["run", "-p", "quicnetd", "--", "--one-shot", "--force-network-reprobe", "--network-change-trigger-path", "/tmp/quipnet-network-change.trigger"],
+      "args": ["run", "-p", "quipd", "--", "--one-shot", "--force-network-reprobe", "--network-change-trigger-path", "/tmp/quip-network-change.trigger"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",
@@ -41,7 +41,7 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
-      "args": ["run", "-p", "quicnet", "--", "path", "watch", "--sample-limit", "1"],
+      "args": ["run", "-p", "quip", "--", "path", "watch", "--sample-limit", "1"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",
@@ -50,7 +50,7 @@
     {
       "type": "proc_spawn",
       "cmd": "cargo",
-      "args": ["run", "-p", "quicnet", "--", "status"],
+      "args": ["run", "-p", "quip", "--", "status"],
       "expect_exit": 0
     }
   ]

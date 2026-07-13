@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/state.reset.request.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/request_envelope" },
+    {
+      "properties": {
+        "operation": { "const": "state.reset" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scope", "confirmation"],
+          "properties": {
+            "scope": {
+              "type": "string",
+              "enum": ["network_state_only"]
+            },
+            "confirmation": {
+              "type": "string",
+              "const": "preserve-identity-reset-network-state"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

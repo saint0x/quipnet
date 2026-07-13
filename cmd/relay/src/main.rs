@@ -88,8 +88,12 @@ fn main() {
                 continue;
             }
         };
-        let (status, payload) =
-            control_response(&mut service, request.method().as_str(), request.url(), &body);
+        let (status, payload) = control_response(
+            &mut service,
+            request.method().as_str(),
+            request.url(),
+            &body,
+        );
         let response = Response::from_string(payload)
             .with_status_code(StatusCode(status))
             .with_header(
@@ -127,18 +131,15 @@ fn read_request_body(request: &mut tiny_http::Request) -> Result<Vec<u8>, (u16, 
     }
     let mut body = Vec::with_capacity(limit);
     body.resize(limit, 0);
-    request
-        .as_reader()
-        .read_exact(&mut body)
-        .map_err(|error| {
-            (
-                400,
-                serde_json::json!({
-                    "error": format!("relay control request body could not be read: {error}")
-                })
-                .to_string(),
-            )
-        })?;
+    request.as_reader().read_exact(&mut body).map_err(|error| {
+        (
+            400,
+            serde_json::json!({
+                "error": format!("relay control request body could not be read: {error}")
+            })
+            .to_string(),
+        )
+    })?;
     Ok(body)
 }
 

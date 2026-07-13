@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crypto::IdentityKeypair;
 use control::{AuthorityArtifactSnapshot, ControlClient};
+use crypto::IdentityKeypair;
 use membership::{CapabilityGrant, MembershipCertificate, RevocationRecord, RevocationTarget};
 use relaywire::{RelayAnnouncement, RelayMap};
 use serde::{Deserialize, Serialize};
@@ -105,7 +105,7 @@ pub struct DaemonState {
     pub peers: Vec<PeerInspection>,
     pub netcheck: NetcheckReport,
     pub queue_policies: Vec<QueuePolicy>,
-    #[serde(default)]
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub active_sessions: Vec<SessionSnapshot>,
     pub path_candidates: Vec<PathCandidate>,
 }
@@ -947,8 +947,10 @@ impl LocalControlPlane {
     where
         T: SessionLifecycleTransport,
     {
-        let state = self.ensure_state()?;
-        self.persist_runtime_sessions(state, transport)
+        let mut state = self.ensure_state()?;
+        state.active_sessions = transport.active_sessions()?;
+        state.save(&self.config.state_path)?;
+        Ok(state)
     }
 
     pub async fn close_session<T>(
@@ -959,16 +961,14 @@ impl LocalControlPlane {
     where
         T: SessionLifecycleTransport,
     {
-        let state = self.ensure_state()?;
-        let runtime_session = transport.session_snapshot(session_id)?;
-        if runtime_session.is_none() && state.session(session_id).is_none() {
-            return Err(DaemonStateError::SessionNotFound(hex_session_id(session_id)));
-        }
-        if let Some(session) = runtime_session {
-            transport.close_session(&session).await?;
-        }
-        self.persist_runtime_sessions(state.without_session(session_id), transport)
-            .map(|_| ())
+        let mut state = self.ensure_state()?;
+        let session = transport
+            .session_snapshot(session_id)?
+            .ok_or_else(|| DaemonStateError::SessionNotFound(hex_session_id(session_id)))?;
+        transport.close_session(&session).await?;
+        state.active_sessions = transport.active_sessions()?;
+        state.save(&self.config.state_path)?;
+        Ok(())
     }
 
     pub async fn upgrade_session<T>(
@@ -980,15 +980,9 @@ impl LocalControlPlane {
         T: SessionLifecycleTransport,
     {
         let state = self.ensure_state()?;
-        let session = transport.session_snapshot(session_id)?.ok_or_else(|| {
-            if state.session(session_id).is_some() {
-                DaemonStateError::InvalidSession(
-                    "session is not active in runtime transport".to_string(),
-                )
-            } else {
-                DaemonStateError::SessionNotFound(hex_session_id(session_id))
-            }
-        })?;
+        let session = transport
+            .session_snapshot(session_id)?
+            .ok_or_else(|| DaemonStateError::SessionNotFound(hex_session_id(session_id)))?;
         let protocol = session.protocol.clone().ok_or_else(|| {
             DaemonStateError::InvalidSession("session has no negotiated protocol".to_string())
         })?;
@@ -998,7 +992,9 @@ impl LocalControlPlane {
         }
         let route = state.route_plan(&session.peer, Some(protocol), session.class)?;
         let upgraded = transport.migrate(&session, route).await?;
-        self.persist_runtime_sessions(state.with_active_session(upgraded.clone()), transport)?;
+        let mut state = state.with_active_session(upgraded.clone());
+        state.active_sessions = transport.active_sessions()?;
+        state.save(&self.config.state_path)?;
         Ok(upgraded)
     }
 
@@ -1009,20 +1005,29 @@ impl LocalControlPlane {
     where
         T: SessionLifecycleTransport,
     {
-        let state = self.ensure_state()?;
+        let mut state = self.ensure_state()?;
         let sessions = transport.active_sessions()?;
-        let runtime_session_ids = sessions
-            .iter()
-            .map(|session| session.session_id)
-            .collect::<std::collections::BTreeSet<_>>();
         let mut entries = Vec::with_capacity(sessions.len());
         let mut unchanged = 0;
         let mut upgraded = 0;
         let mut closed = 0;
 
         for session in sessions {
+            let Some(session) = transport.session_snapshot(&session.session_id)? else {
+                state = state.without_session(&session.session_id);
+                closed += 1;
+                entries.push(SessionReconcileEntry {
+                    session_id: session.session_id,
+                    peer: session.peer,
+                    disposition: SessionReconcileDisposition::Closed,
+                    reason: "session is not active in runtime transport".to_string(),
+                    path_kind: None,
+                });
+                continue;
+            };
             let Some(protocol) = session.protocol.clone() else {
                 transport.close_session(&session).await?;
+                state = state.without_session(&session.session_id);
                 closed += 1;
                 entries.push(SessionReconcileEntry {
                     session_id: session.session_id,
@@ -1037,6 +1042,7 @@ impl LocalControlPlane {
             let policy = state.explain_policy(&session.peer, &protocol);
             if !policy.allowed {
                 transport.close_session(&session).await?;
+                state = state.without_session(&session.session_id);
                 closed += 1;
                 entries.push(SessionReconcileEntry {
                     session_id: session.session_id,
@@ -1053,6 +1059,7 @@ impl LocalControlPlane {
                 Ok(route) => route,
                 Err(DaemonStateError::NoRoute(_)) => {
                     transport.close_session(&session).await?;
+                    state = state.without_session(&session.session_id);
                     closed += 1;
                     entries.push(SessionReconcileEntry {
                         session_id: session.session_id,
@@ -1079,7 +1086,8 @@ impl LocalControlPlane {
             }
 
             let next_path_kind = route.path_kind;
-            transport.migrate(&session, route).await?;
+            let migrated = transport.migrate(&session, route).await?;
+            state = state.with_active_session(migrated);
             upgraded += 1;
             entries.push(SessionReconcileEntry {
                 session_id: session.session_id,
@@ -1090,20 +1098,8 @@ impl LocalControlPlane {
             });
         }
 
-        for session in state.active_sessions.clone() {
-            if !runtime_session_ids.contains(&session.session_id) {
-                closed += 1;
-                entries.push(SessionReconcileEntry {
-                    session_id: session.session_id,
-                    peer: session.peer,
-                    disposition: SessionReconcileDisposition::Closed,
-                    reason: "session is not active in runtime transport".to_string(),
-                    path_kind: None,
-                });
-            }
-        }
-
-        self.persist_runtime_sessions(state, transport)?;
+        state.active_sessions = transport.active_sessions()?;
+        state.save(&self.config.state_path)?;
         Ok(SessionReconcileReport {
             examined: entries.len(),
             unchanged,
@@ -1131,7 +1127,9 @@ impl LocalControlPlane {
         let route = state.route_plan(peer, Some(protocol.clone()), class)?;
         let connection = transport.connect(route).await?;
         let session = connection.snapshot();
-        self.persist_runtime_sessions(state.with_active_session(session.clone()), transport)?;
+        let mut state = state.with_active_session(session.clone());
+        state.active_sessions = transport.active_sessions()?;
+        state.save(&self.config.state_path)?;
         Ok(session)
     }
 
@@ -1142,21 +1140,6 @@ impl LocalControlPlane {
     ) -> Result<Decision, DaemonStateError> {
         let state = self.ensure_state()?;
         Ok(state.explain_policy(peer, protocol))
-    }
-}
-
-impl LocalControlPlane {
-    fn persist_runtime_sessions<T>(
-        &self,
-        mut state: DaemonState,
-        transport: &T,
-    ) -> Result<DaemonState, DaemonStateError>
-    where
-        T: SessionLifecycleTransport,
-    {
-        state.active_sessions = transport.active_sessions()?;
-        state.save(&self.config.state_path)?;
-        Ok(state)
     }
 }
 
@@ -2482,7 +2465,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realize_best_path_persists_accepted_relay_session() {
+    async fn realize_best_path_keeps_runtime_sessions_out_of_persisted_state() {
         let _guard = relay_test_lock();
         clear_registry();
         let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-runtime");
@@ -2585,13 +2568,12 @@ mod tests {
         let persisted = DaemonState::load(&state_path).expect("persisted state should load");
         assert_eq!(session.path_kind, PathKind::Relay);
         assert!(session.relay_attempt_id.is_some());
-        assert_eq!(persisted.active_sessions.len(), 1);
-        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
+        assert!(persisted.active_sessions.is_empty());
         let _ = std::fs::remove_file(state_path);
     }
 
     #[tokio::test]
-    async fn close_session_removes_persisted_relay_session_and_releases_registry() {
+    async fn close_session_releases_runtime_registry_without_persisting_sessions() {
         let _guard = relay_test_lock();
         let state_path = unique_state_path("quicnet-relay-close-state");
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
@@ -2613,7 +2595,6 @@ mod tests {
 
         let persisted = DaemonState::load(&state_path).expect("persisted state should load");
         assert!(persisted.active_sessions.is_empty());
-        assert!(persisted.session(&session.session_id).is_none());
         assert_eq!(registered_session_count(&relay_peer), Some(0));
 
         let _ = std::fs::remove_file(state_path);
@@ -2648,15 +2629,19 @@ mod tests {
             SessionReconcileDisposition::Unchanged
         );
         assert_eq!(report.entries[0].path_kind, Some(PathKind::DirectUdp));
-        assert_eq!(persisted.active_sessions.len(), 1);
-        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
-        assert_eq!(persisted.active_sessions[0].peer, bootstrap_peer);
+        assert!(persisted.active_sessions.is_empty());
+        let runtime_sessions = transport
+            .active_sessions()
+            .expect("runtime sessions should load");
+        assert_eq!(runtime_sessions.len(), 1);
+        assert_eq!(runtime_sessions[0].session_id, session.session_id);
+        assert_eq!(runtime_sessions[0].peer, bootstrap_peer);
 
         let _ = std::fs::remove_file(state_path);
     }
 
     #[tokio::test]
-    async fn upgrade_session_persists_direct_path_and_releases_relay_registry() {
+    async fn upgrade_session_updates_runtime_path_and_releases_relay_registry() {
         let _guard = relay_test_lock();
         let state_path = unique_state_path("quicnet-relay-upgrade-state");
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
@@ -2693,53 +2678,14 @@ mod tests {
         ));
         assert_eq!(upgraded.relay_peer, None);
         assert_eq!(upgraded.relay_control_endpoint, None);
-        assert_eq!(persisted.active_sessions.len(), 1);
-        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
-        assert_eq!(persisted.active_sessions[0].path_kind, upgraded.path_kind);
-        assert_eq!(persisted.active_sessions[0].relay_peer, None);
-        assert_eq!(persisted.active_sessions[0].relay_control_endpoint, None);
-        assert_eq!(registered_session_count(&relay_peer), Some(0));
-
-        let _ = std::fs::remove_file(state_path);
-        clear_registry();
-    }
-
-    #[tokio::test]
-    async fn upgrade_session_uses_runtime_session_when_persisted_entry_is_missing() {
-        let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-relay-upgrade-runtime-primary-state");
-        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
-            "relay-upgrade-runtime-primary-prod",
-            &state_path,
-            65,
-            66,
-            b"relay-upgrade-runtime-primary",
-            b"relay-upgrade-runtime-primary-target",
-        )
-        .await;
-
-        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
-        updated.netcheck.udp_reachable = true;
-        updated.netcheck.ipv6_reachable = false;
-        updated.netcheck.public_udp_addr = Some("203.0.113.53:8443".to_string());
-        updated.active_sessions.clear();
-        updated
-            .save(&state_path)
-            .expect("updated state should persist");
-
-        let upgraded = control
-            .upgrade_session(&session.session_id, &transport)
-            .await
-            .expect("runtime-owned relay session should still migrate");
-
-        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
-        assert_eq!(upgraded.session_id, session.session_id);
-        assert!(matches!(
-            upgraded.path_kind,
-            PathKind::DirectUdp | PathKind::DirectIpv6
-        ));
-        assert_eq!(persisted.active_sessions.len(), 1);
-        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
+        assert!(persisted.active_sessions.is_empty());
+        let runtime = transport
+            .session_snapshot(&session.session_id)
+            .expect("runtime session lookup should succeed")
+            .expect("runtime session should still exist");
+        assert_eq!(runtime.path_kind, upgraded.path_kind);
+        assert_eq!(runtime.relay_peer, None);
+        assert_eq!(runtime.relay_control_endpoint, None);
         assert_eq!(registered_session_count(&relay_peer), Some(0));
 
         let _ = std::fs::remove_file(state_path);
@@ -2787,13 +2733,17 @@ mod tests {
             report.entries[0].path_kind,
             Some(PathKind::DirectUdp | PathKind::DirectIpv6)
         ));
-        assert_eq!(persisted.active_sessions.len(), 1);
-        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
+        assert!(persisted.active_sessions.is_empty());
+        let runtime = transport
+            .session_snapshot(&session.session_id)
+            .expect("runtime session lookup should succeed")
+            .expect("runtime session should still exist");
+        assert_eq!(runtime.session_id, session.session_id);
         assert!(matches!(
-            persisted.active_sessions[0].path_kind,
+            runtime.path_kind,
             PathKind::DirectUdp | PathKind::DirectIpv6
         ));
-        assert_eq!(persisted.active_sessions[0].relay_peer, None);
+        assert_eq!(runtime.relay_peer, None);
         assert_eq!(registered_session_count(&relay_peer), Some(0));
 
         let _ = std::fs::remove_file(state_path);
@@ -2844,7 +2794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_sessions_closes_persisted_session_missing_from_runtime_transport() {
+    async fn reconcile_sessions_ignores_stale_persisted_sessions_missing_from_runtime_transport() {
         let state_path = unique_state_path("quicnet-direct-reconcile-missing-runtime-state");
         let (control, _transport, session, _bootstrap_peer) = establish_persisted_direct_session(
             "direct-reconcile-missing-runtime-prod",
@@ -2862,90 +2812,21 @@ mod tests {
         let report = control
             .reconcile_sessions(&fresh_transport)
             .await
-            .expect("missing runtime session should prune persisted state");
+            .expect("missing runtime session should not be treated as durable truth");
 
         let persisted = DaemonState::load(&state_path).expect("persisted state should load");
-        assert_eq!(report.examined, 1);
-        assert_eq!(report.closed, 1);
+        assert_eq!(report.examined, 0);
+        assert_eq!(report.closed, 0);
         assert_eq!(report.upgraded, 0);
         assert_eq!(report.unchanged, 0);
-        assert_eq!(report.entries[0].session_id, session.session_id);
-        assert_eq!(
-            report.entries[0].reason,
-            "session is not active in runtime transport"
-        );
         assert!(persisted.active_sessions.is_empty());
+        let _ = session;
 
         let _ = std::fs::remove_file(state_path);
     }
 
     #[tokio::test]
-    async fn reconcile_sessions_uses_runtime_sessions_when_persisted_entries_are_missing() {
-        let state_path = unique_state_path("quicnet-direct-reconcile-runtime-primary-state");
-        let (control, transport, session, bootstrap_peer) = establish_persisted_direct_session(
-            "direct-reconcile-runtime-primary-prod",
-            &state_path,
-            95,
-            96,
-            b"direct-reconcile-runtime-primary-target",
-        )
-        .await;
-        let mut persisted = DaemonState::load(&state_path).expect("persisted state should load");
-        persisted.active_sessions.clear();
-        persisted.save(&state_path).expect("state should persist");
-
-        let report = control
-            .reconcile_sessions(&transport)
-            .await
-            .expect("runtime sessions should reconcile even if cache is empty");
-
-        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
-        assert_eq!(report.examined, 1);
-        assert_eq!(report.unchanged, 1);
-        assert_eq!(report.upgraded, 0);
-        assert_eq!(report.closed, 0);
-        assert_eq!(report.entries[0].session_id, session.session_id);
-        assert_eq!(persisted.active_sessions.len(), 1);
-        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
-        assert_eq!(persisted.active_sessions[0].peer, bootstrap_peer);
-
-        let _ = std::fs::remove_file(state_path);
-    }
-
-    #[tokio::test]
-    async fn close_session_uses_runtime_snapshot_when_persisted_relay_metadata_is_stale() {
-        let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-relay-close-runtime-primary-state");
-        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
-            "relay-close-runtime-primary-prod",
-            &state_path,
-            53,
-            54,
-            b"relay-close-runtime-primary",
-            b"relay-close-runtime-primary-target",
-        )
-        .await;
-
-        let mut persisted = DaemonState::load(&state_path).expect("persisted state should load");
-        persisted.active_sessions[0].relay_control_endpoint = Some("inproc://wrong-relay".to_string());
-        persisted.active_sessions[0].transport_session_id = [0_u8; 16];
-        persisted.save(&state_path).expect("state should persist");
-
-        control
-            .close_session(&session.session_id, &transport)
-            .await
-            .expect("runtime snapshot should drive relay teardown");
-
-        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
-        assert!(persisted.active_sessions.is_empty());
-        assert_eq!(registered_session_count(&relay_peer), Some(0));
-
-        let _ = std::fs::remove_file(state_path);
-        clear_registry();
-    }
-
-    #[tokio::test]
-    async fn sync_runtime_sessions_replaces_persisted_active_sessions() {
+    async fn sync_runtime_sessions_exposes_runtime_state_without_persisting_sessions() {
         let state_path = unique_state_path("quicnet-sync-runtime-sessions-state");
         let (control, transport, session, _bootstrap_peer) = establish_persisted_direct_session(
             "direct-sync-runtime-prod",
@@ -2955,31 +2836,14 @@ mod tests {
             b"direct-sync-runtime-target",
         )
         .await;
-        let mut persisted = DaemonState::load(&state_path).expect("persisted state should load");
-        persisted.active_sessions.push(SessionSnapshot {
-            session_id: [3_u8; 16],
-            transport_session_id: [4_u8; 16],
-            relay_attempt_id: None,
-            peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"stale-peer"),
-            protocol: Some(ProtocolId::new("/quicnet/control/1").expect("protocol")),
-            class: TrafficClass::Control,
-            path_kind: PathKind::DirectUdp,
-            source: RouteSource::Observed,
-            remote_endpoint: "quic://198.51.100.90:8443".to_string(),
-            relay_peer: None,
-            relay_endpoint: None,
-            relay_control_endpoint: None,
-            datagrams_capable: true,
-            migration_capable: true,
-        });
-        persisted.save(&state_path).expect("stale persisted state should save");
-
         let synced = control
             .sync_runtime_sessions(&transport)
             .expect("runtime sessions should become primary");
 
         assert_eq!(synced.active_sessions.len(), 1);
         assert_eq!(synced.active_sessions[0].session_id, session.session_id);
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert!(persisted.active_sessions.is_empty());
         let _ = std::fs::remove_file(state_path);
     }
 

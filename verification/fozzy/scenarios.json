@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "seed_policy": {
+    "mode": "deterministic_required",
+    "default_seed": 424242
+  },
+  "doctor_defaults": {
+    "runs": 5,
+    "strict": true
+  },
+  "scenarios": [
+    {
+      "id": "clean-bootstrap",
+      "priority": 1,
+      "description": "Node starts from valid durable identity and durable state and reaches healthy runtime status.",
+      "checks": [
+        "daemon_health_ready",
+        "identity_loaded",
+        "durable_state_loaded",
+        "authority_bootstrap_visible"
+      ],
+      "focus": ["startup", "status", "authority"]
+    },
+    {
+      "id": "restart-preserved-identity",
+      "priority": 1,
+      "description": "Restart preserves identity and durable state without falsely restoring runtime sessions.",
+      "checks": [
+        "identity_stable_after_restart",
+        "durable_state_reused_honestly",
+        "stale_runtime_references_rejected"
+      ],
+      "focus": ["restart", "runtime_ownership", "durable_vs_runtime"]
+    },
+    {
+      "id": "network-state-reset-preserved-identity",
+      "priority": 1,
+      "description": "Network state reset preserves identity and requires honest re-bootstrap.",
+      "checks": [
+        "identity_preserved",
+        "network_state_reset",
+        "bootstrap_required_after_reset"
+      ],
+      "focus": ["state_reset", "identity_preservation", "bootstrap"]
+    },
+    {
+      "id": "authority-sync-membership-update",
+      "priority": 1,
+      "description": "Authority sync updates accepted facts and exposes resulting runtime impact.",
+      "checks": [
+        "authority_sync_visible",
+        "accepted_facts_updated",
+        "runtime_reevaluation_triggered"
+      ],
+      "focus": ["authority", "membership", "reevaluation"]
+    },
+    {
+      "id": "revocation-enforcement",
+      "priority": 1,
+      "description": "Revocation changes propagate into runtime behavior and reconnect policy.",
+      "checks": [
+        "revocation_detected",
+        "policy_driven_session_action_visible",
+        "reconnect_suppression_visible"
+      ],
+      "focus": ["revocation", "policy", "runtime_enforcement"]
+    },
+    {
+      "id": "capability-change",
+      "priority": 1,
+      "description": "Capability changes reevaluate runtime behavior correctly.",
+      "checks": [
+        "capability_change_visible",
+        "runtime_behavior_reevaluated",
+        "durable_and_runtime_policy_alignment"
+      ],
+      "focus": ["capabilities", "policy_drift", "runtime_reevaluation"]
+    },
+    {
+      "id": "direct-path-success",
+      "priority": 2,
+      "description": "Direct path establishment succeeds and is reported honestly.",
+      "checks": [
+        "session_connect_succeeds",
+        "direct_path_selected",
+        "runtime_path_visible"
+      ],
+      "focus": ["direct_path", "session_connect", "runtime_paths"]
+    },
+    {
+      "id": "relay-fallback",
+      "priority": 2,
+      "description": "Relay fallback is used when direct connectivity is unavailable and is visible to operators.",
+      "checks": [
+        "relay_path_selected",
+        "fallback_reason_visible",
+        "session_continuity_preserved"
+      ],
+      "focus": ["relay", "fallback", "path_choice"]
+    },
+    {
+      "id": "path-migration",
+      "priority": 2,
+      "description": "Session path migration is daemon-owned and observable.",
+      "checks": [
+        "migration_started_visible",
+        "migration_completed_visible",
+        "active_path_updated_honestly"
+      ],
+      "focus": ["path_migration", "runtime_events", "path_state"]
+    },
+    {
+      "id": "reconnect-after-drop",
+      "priority": 1,
+      "description": "Reconnect after drop follows daemon-owned policy with deterministic retry behavior.",
+      "checks": [
+        "drop_detected",
+        "retry_policy_visible",
+        "reconnect_outcome_visible"
+      ],
+      "focus": ["reconnect", "drop_recovery", "runtime_policy"]
+    },
+    {
+      "id": "durable-state-validation-failure",
+      "priority": 1,
+      "description": "Invalid durable state fails validation clearly and safely.",
+      "checks": [
+        "invalid_state_rejected",
+        "schema_violation_reported",
+        "startup_fails_safely"
+      ],
+      "focus": ["state_schema", "validation_failure", "safe_startup"]
+    },
+    {
+      "id": "backup-and-restore",
+      "priority": 1,
+      "description": "Backup and restore recover the same logical node without confusing restore and rotation semantics.",
+      "checks": [
+        "identity_restored",
+        "network_state_restored",
+        "post_restore_runtime_correct"
+      ],
+      "focus": ["backup", "restore", "identity_vs_network_state"]
+    }
+  ]
+}

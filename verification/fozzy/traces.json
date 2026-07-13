@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "required_traces": [
+    {
+      "id": "trace-clean-bootstrap",
+      "scenario": "clean-bootstrap",
+      "required_steps": [
+        "record",
+        "trace_verify_strict",
+        "replay",
+        "ci_validate"
+      ]
+    },
+    {
+      "id": "trace-restart-preserved-identity",
+      "scenario": "restart-preserved-identity",
+      "required_steps": [
+        "record",
+        "trace_verify_strict",
+        "replay",
+        "ci_validate"
+      ]
+    },
+    {
+      "id": "trace-revocation-enforcement",
+      "scenario": "revocation-enforcement",
+      "required_steps": [
+        "record",
+        "trace_verify_strict",
+        "replay",
+        "ci_validate"
+      ]
+    },
+    {
+      "id": "trace-reconnect-after-drop",
+      "scenario": "reconnect-after-drop",
+      "required_steps": [
+        "record",
+        "trace_verify_strict",
+        "replay",
+        "ci_validate"
+      ]
+    },
+    {
+      "id": "trace-relay-or-migration",
+      "scenario": "relay-fallback",
+      "alternates": ["path-migration"],
+      "required_steps": [
+        "record",
+        "trace_verify_strict",
+        "replay",
+        "ci_validate"
+      ]
+    }
+  ]
+}

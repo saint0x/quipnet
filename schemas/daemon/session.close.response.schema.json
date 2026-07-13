@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/session.close.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["truth_kind", "closed_session_id", "final_state"],
+          "properties": {
+            "truth_kind": { "const": "runtime" },
+            "closed_session_id": { "type": "string", "minLength": 1 },
+            "final_state": {
+              "type": "string",
+              "enum": ["closing", "closed", "failed"]
+            },
+            "closure_reason": {
+              "type": "string",
+              "enum": [
+                "operator_requested",
+                "local_runtime_failure",
+                "remote_failure",
+                "policy_rejected",
+                "path_exhaustion",
+                "daemon_shutdown"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
