@@ -164,6 +164,12 @@ pub struct SessionReconcileReport {
     pub entries: Vec<SessionReconcileEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableStateValidationReport {
+    pub schema_version: u64,
+    pub state_path: PathBuf,
+}
+
 impl DaemonState {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, DaemonStateError> {
         let value = serde_json::from_slice::<Value>(&fs::read(path)?)?;
@@ -526,6 +532,18 @@ impl DaemonState {
         state.path_candidates = merged_path_candidates(&state);
         Ok(state)
     }
+}
+
+pub fn validate_durable_state_file(
+    path: impl AsRef<Path>,
+) -> Result<DurableStateValidationReport, DaemonStateError> {
+    let path = path.as_ref();
+    let value = serde_json::from_slice::<Value>(&fs::read(path)?)?;
+    validate_durable_state_value(&value)?;
+    Ok(DurableStateValidationReport {
+        schema_version: DAEMON_STATE_SCHEMA_VERSION,
+        state_path: path.to_path_buf(),
+    })
 }
 
 #[derive(Debug)]
@@ -1006,6 +1024,19 @@ impl LocalControlPlane {
 
     pub fn session_snapshots(&self) -> Result<Vec<SessionSnapshot>, DaemonStateError> {
         Ok(self.ensure_state()?.active_sessions.clone())
+    }
+
+    pub fn validate_state_file(&self) -> Result<DurableStateValidationReport, DaemonStateError> {
+        validate_durable_state_file(&self.config.state_path)
+    }
+
+    pub fn reset_network_state(&self) -> Result<bool, DaemonStateError> {
+        if self.config.state_path.exists() {
+            fs::remove_file(&self.config.state_path)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn sync_runtime_sessions<T>(&self, transport: &T) -> Result<DaemonState, DaemonStateError>
@@ -2176,6 +2207,37 @@ mod tests {
             DaemonStateError::UnsupportedDurableField(field) if field == "active_sessions"
         ));
         let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn validate_state_file_reports_schema_version_and_path() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-validate-state.json");
+        let state = fixture_daemon_state("validate-state-report");
+        state.save(&temp).expect("fixture state should persist");
+        let control = LocalControlPlane::new(DaemonConfig::new("validate-state-report", &temp));
+
+        let report = control
+            .validate_state_file()
+            .expect("state validation should succeed");
+
+        assert_eq!(report.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert_eq!(report.state_path, temp);
+        let _ = std::fs::remove_file(report.state_path);
+    }
+
+    #[test]
+    fn reset_network_state_removes_only_durable_state_file() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-reset-state.json");
+        let control = LocalControlPlane::new(DaemonConfig::new("reset-state-report", &temp));
+        let state = fixture_daemon_state("reset-state-report");
+        state.save(&temp).expect("fixture state should persist");
+
+        let removed = control
+            .reset_network_state()
+            .expect("state reset should succeed");
+
+        assert!(removed);
+        assert!(!temp.exists());
     }
 
     #[test]

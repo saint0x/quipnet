@@ -9,7 +9,7 @@
 - [ ] Wire `schemas/daemon/` and `fixtures/daemon/` into daemon API integration tests and CLI rendering tests.
 - [ ] Wire `schemas/events/runtime-event.schema.json` and `fixtures/events/` into runtime event emission tests and scenario assertions.
 - [ ] Implement a bounded runtime event surface matching `docs/runtime-events.md` so lifecycle, authority, path, and reconnect transitions are observable and testable.
-- [ ] Back the documented operator workflows with real daemon/API commands: identity inspection, authority inspection, authority sync, durable-state validation, safe state reset, and recovery diagnostics.
+- [ ] Finish backing the documented operator workflows with real daemon/API commands, especially authority inspection, authority sync, and fuller recovery diagnostics beyond the now-implemented durable-state validation and safe state reset surface.
 - [ ] Implement safe backup/export and restore support that matches `docs/backup-and-restore.md` and preserves the identity-versus-network-state split.
 - [ ] Finish the remaining repo-wide `quip` rename fallout in tests, scripts, release assets, packaging surfaces, and any stale local source references beyond the local Fozzy smoke path already updated.
 - [ ] Expand the production verification program from `docs/verification-plan.md` beyond the validated local smoke flow so the broader runtime model is covered with Fozzy: deterministic scenarios, recorded traces, replay verification, CI-style trace validation, and host-backed runs where feasible.

@@ -85,6 +85,10 @@ enum Command {
         session: Option<String>,
     },
     SessionReconcile,
+    State {
+        #[command(subcommand)]
+        command: StateCommand,
+    },
     IdentityInit {
         #[arg(long, default_value_t = false)]
         overwrite: bool,
@@ -112,6 +116,15 @@ enum PathCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum StateCommand {
+    Validate,
+    Reset {
+        #[arg(long)]
+        confirm: bool,
+    },
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(error) = run().await {
@@ -121,7 +134,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    observability::init_tracing("quicnet");
+    observability::init_tracing("quip");
     let mut cli = Cli::parse();
     normalize_cli_paths(&mut cli);
     let control = LocalControlPlane::new(DaemonConfig::new(
@@ -355,40 +368,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
             );
         }
         Command::SessionStatus => {
-            let sessions = control.session_snapshots()?;
-            if sessions.is_empty() {
-                println!("no cached sessions");
-            } else {
-                for session in sessions {
-                    println!(
-                        "session_id={} transport_session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={} cached=true",
-                        hex_session_id(&session.session_id),
-                        hex_session_id(&session.transport_session_id),
-                        session
-                            .relay_attempt_id
-                            .as_ref()
-                            .map(hex_session_id)
-                            .unwrap_or_else(|| "none".to_string()),
-                        session.peer,
-                        session
-                            .protocol
-                            .as_ref()
-                            .map(ProtocolId::as_str)
-                            .unwrap_or("none"),
-                        class_label(session.class),
-                        session.path_kind,
-                        session
-                            .relay_peer
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "direct".to_string()),
-                        session.remote_endpoint,
-                        session.relay_endpoint.unwrap_or_else(|| "none".to_string()),
-                        session.datagrams_capable,
-                        session.migration_capable,
-                    );
-                }
-            }
+            return Err(runtime_session_cli_error(
+                "session-status requires a daemon-owned runtime session registry and cannot run from a standalone quip process",
+            )
+            .into());
         }
         Command::SessionClose { session } => {
             let sessions = control.session_snapshots()?;
@@ -414,6 +397,30 @@ async fn run() -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
+        Command::State { command } => match command {
+            StateCommand::Validate => {
+                let report = control.validate_state_file()?;
+                println!(
+                    "state_path={} schema_version={} valid=true",
+                    report.state_path.display(),
+                    report.schema_version
+                );
+            }
+            StateCommand::Reset { confirm } => {
+                if !confirm {
+                    return Err(usage_error(
+                        "state reset is destructive; rerun with --confirm to preserve identity and remove only durable network state",
+                    )
+                    .into());
+                }
+                let removed = control.reset_network_state()?;
+                println!(
+                    "state_path={} identity_preserved=true network_state_reset={} next_action=bootstrap_required",
+                    cli.state_path,
+                    removed
+                );
+            }
+        },
         Command::RelayStatus => {
             let state = control.ensure_state()?;
             if state.relay_announcements().is_empty() {
@@ -690,6 +697,15 @@ mod tests {
         );
 
         assert!(error.to_string().contains("daemon-owned runtime"));
+    }
+
+    #[test]
+    fn usage_error_mentions_confirmation_requirement() {
+        let error = usage_error(
+            "state reset is destructive; rerun with --confirm to preserve identity and remove only durable network state",
+        );
+
+        assert!(error.to_string().contains("--confirm"));
     }
 
     #[test]
