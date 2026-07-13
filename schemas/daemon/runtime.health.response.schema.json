@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/runtime.health.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "truth_kind",
+            "daemon_readiness",
+            "authority_sync_health",
+            "runtime_registry_health",
+            "path_manager_health",
+            "reconnect_subsystem_health",
+            "active_sessions",
+            "active_paths",
+            "active_listeners",
+            "reconnect_state",
+            "reconnect_suppression_count",
+            "runtime_event_buffer_depth"
+          ],
+          "properties": {
+            "truth_kind": { "const": "runtime" },
+            "daemon_readiness": {
+              "type": "string",
+              "enum": ["ready", "degraded", "failed", "suppressed"]
+            },
+            "authority_sync_health": {
+              "type": "string",
+              "enum": ["ready", "degraded", "failed", "suppressed"]
+            },
+            "runtime_registry_health": {
+              "type": "string",
+              "enum": ["ready", "degraded", "failed", "suppressed"]
+            },
+            "path_manager_health": {
+              "type": "string",
+              "enum": ["ready", "degraded", "failed", "suppressed"]
+            },
+            "reconnect_subsystem_health": {
+              "type": "string",
+              "enum": ["ready", "degraded", "failed", "suppressed"]
+            },
+            "active_sessions": { "type": "integer", "minimum": 0 },
+            "active_paths": { "type": "integer", "minimum": 0 },
+            "active_listeners": { "type": "integer", "minimum": 0 },
+            "reconnect_state": {
+              "type": "string",
+              "enum": ["idle", "active", "suppressed", "failed"]
+            },
+            "reconnect_suppression_count": { "type": "integer", "minimum": 0 },
+            "runtime_event_buffer_depth": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  ]
+}

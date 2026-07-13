@@ -140,6 +140,44 @@ pub struct ReconnectSuppression {
     pub imposed_at_unix_secs: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeListenerState {
+    Active,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeListenerSnapshot {
+    pub listener_id: String,
+    pub transport: String,
+    pub bind_summary: String,
+    pub protocol: ProtocolId,
+    pub advertise: bool,
+    pub state: RuntimeListenerState,
+    pub started_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeReconnectState {
+    Idle,
+    Active,
+    Suppressed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeTransportHealth {
+    pub active_sessions: usize,
+    pub active_listeners: usize,
+    pub reconnect_state: RuntimeReconnectState,
+    pub reconnect_suppression_count: usize,
+    pub event_buffer_depth: usize,
+    pub session_registry_healthy: bool,
+    pub listener_registry_healthy: bool,
+}
+
 pub trait ConnectionHandle {
     fn snapshot(&self) -> SessionSnapshot;
 }
@@ -188,6 +226,10 @@ pub trait SessionLifecycleTransport: SecureTransport {
     ) -> Result<(), TransportError>;
 
     fn reconnect_suppressions(&self) -> Result<Vec<ReconnectSuppression>, TransportError>;
+
+    fn active_listeners(&self) -> Result<Vec<RuntimeListenerSnapshot>, TransportError>;
+
+    fn transport_health(&self) -> Result<RuntimeTransportHealth, TransportError>;
 
     async fn migrate(
         &self,

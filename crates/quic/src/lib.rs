@@ -11,7 +11,8 @@ use relaywire::RelayOpenRequest;
 use serde_json::json;
 use transport::{
     BindSpec, ConnectionHandle, ReconnectSuppression, RelayPlan, RoutePlan, RuntimeEvent,
-    RuntimeEventSubject, RuntimeSessionState, SecureTransport, SessionClosureReason,
+    RuntimeEventSubject, RuntimeListenerSnapshot, RuntimeListenerState, RuntimeReconnectState,
+    RuntimeSessionState, RuntimeTransportHealth, SecureTransport, SessionClosureReason,
     SessionLifecycleTransport, SessionSnapshot, TransportError,
 };
 
@@ -33,6 +34,11 @@ struct RuntimeSessionRecord {
     alpn_protocol: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeListenerRecord {
+    snapshot: RuntimeListenerSnapshot,
+}
+
 #[derive(Clone)]
 pub struct QuicTransportAdapter {
     pub implementation: &'static str,
@@ -42,6 +48,7 @@ pub struct QuicTransportAdapter {
     pub local_identity: Option<IdentityKeypair>,
     relay_control: Arc<dyn RelayControl>,
     runtime_sessions: Arc<RwLock<BTreeMap<[u8; 16], RuntimeSessionRecord>>>,
+    runtime_listeners: Arc<RwLock<BTreeMap<String, RuntimeListenerRecord>>>,
     runtime_events: Arc<RwLock<VecDeque<RuntimeEvent>>>,
     reconnect_suppressions: Arc<RwLock<Vec<ReconnectSuppression>>>,
 }
@@ -56,6 +63,7 @@ impl Default for QuicTransportAdapter {
             local_identity: None,
             relay_control: Arc::new(HttpRelayControl),
             runtime_sessions: Arc::new(RwLock::new(BTreeMap::new())),
+            runtime_listeners: Arc::new(RwLock::new(BTreeMap::new())),
             runtime_events: Arc::new(RwLock::new(VecDeque::new())),
             reconnect_suppressions: Arc::new(RwLock::new(Vec::new())),
         }
@@ -125,10 +133,29 @@ impl SecureTransport for QuicTransportAdapter {
     }
 
     async fn listen(&self, bind: BindSpec) -> Result<Self::Listener, TransportError> {
-        Ok(QuicListenerHandle {
+        let handle = QuicListenerHandle {
             protocol: bind.protocol.as_str().to_string(),
             advertise: bind.advertise,
-        })
+        };
+        upsert_runtime_listener(
+            self,
+            RuntimeListenerRecord {
+                snapshot: RuntimeListenerSnapshot {
+                    listener_id: runtime_listener_id(&bind),
+                    transport: "quic".to_string(),
+                    bind_summary: format!(
+                        "protocol={} advertise={}",
+                        bind.protocol.as_str(),
+                        bind.advertise
+                    ),
+                    protocol: bind.protocol,
+                    advertise: bind.advertise,
+                    state: RuntimeListenerState::Active,
+                    started_at_unix_secs: current_unix_secs(),
+                },
+            },
+        )?;
+        Ok(handle)
     }
 }
 
@@ -276,6 +303,52 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .read()
             .expect("reconnect suppression registry should remain readable")
             .clone())
+    }
+
+    fn active_listeners(&self) -> Result<Vec<RuntimeListenerSnapshot>, TransportError> {
+        Ok(self
+            .runtime_listeners
+            .read()
+            .expect("runtime listener registry should remain readable")
+            .values()
+            .map(|record| record.snapshot.clone())
+            .collect())
+    }
+
+    fn transport_health(&self) -> Result<RuntimeTransportHealth, TransportError> {
+        let active_sessions = self
+            .runtime_sessions
+            .read()
+            .expect("runtime session registry should remain readable")
+            .len();
+        let active_listeners = self
+            .runtime_listeners
+            .read()
+            .expect("runtime listener registry should remain readable")
+            .len();
+        let reconnect_suppression_count = self
+            .reconnect_suppressions
+            .read()
+            .expect("reconnect suppression registry should remain readable")
+            .len();
+        let event_buffer_depth = self
+            .runtime_events
+            .read()
+            .expect("runtime event buffer should remain readable")
+            .len();
+        Ok(RuntimeTransportHealth {
+            active_sessions,
+            active_listeners,
+            reconnect_state: if reconnect_suppression_count > 0 {
+                RuntimeReconnectState::Suppressed
+            } else {
+                RuntimeReconnectState::Idle
+            },
+            reconnect_suppression_count,
+            event_buffer_depth,
+            session_registry_healthy: true,
+            listener_registry_healthy: true,
+        })
     }
 
     async fn migrate(
@@ -612,6 +685,18 @@ fn remove_runtime_session(
         .remove(session_id))
 }
 
+fn upsert_runtime_listener(
+    adapter: &QuicTransportAdapter,
+    record: RuntimeListenerRecord,
+) -> Result<(), TransportError> {
+    adapter
+        .runtime_listeners
+        .write()
+        .expect("runtime listener registry should remain writable")
+        .insert(record.snapshot.listener_id.clone(), record);
+    Ok(())
+}
+
 fn close_relay_transport_session(
     relay_control: &dyn RelayControl,
     control_endpoint: Option<&str>,
@@ -737,6 +822,14 @@ fn hex_session_id(session_id: &[u8; 16]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+fn runtime_listener_id(bind: &BindSpec) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(bind.protocol.as_str().as_bytes());
+    hasher.update(if bind.advertise { b"1" } else { b"0" });
+    hasher.update(current_unix_nanos().to_string().as_bytes());
+    format!("lst-{}", &hasher.finalize().to_hex()[..16])
 }
 
 fn iso8601_seconds(epoch_secs: u64) -> String {
@@ -895,6 +988,13 @@ mod tests {
 
         assert_eq!(handle.protocol, "/quicnet/relay/1");
         assert!(handle.advertise);
+        let listeners = adapter
+            .active_listeners()
+            .expect("listener registry should load");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].transport, "quic");
+        assert_eq!(listeners[0].protocol.as_str(), "/quicnet/relay/1");
+        assert_eq!(listeners[0].state, RuntimeListenerState::Active);
     }
 
     #[tokio::test]
@@ -1042,6 +1142,37 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == "reconnect.suppressed"));
+    }
+
+    #[tokio::test]
+    async fn adapter_transport_health_tracks_listeners_and_suppressions() {
+        let adapter = QuicTransportAdapter::default();
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        adapter
+            .listen(BindSpec {
+                protocol: protocol.clone(),
+                advertise: false,
+            })
+            .await
+            .expect("listener should register");
+        adapter
+            .suppress_reconnect(
+                &PeerId::from_public_key(KeyAlgorithm::Ed25519, b"suppressed-peer"),
+                Some(&protocol),
+                TrafficClass::Control,
+                "policy denied".to_string(),
+            )
+            .expect("suppression should register");
+
+        let health = adapter
+            .transport_health()
+            .expect("transport health should render");
+
+        assert_eq!(health.active_listeners, 1);
+        assert_eq!(health.reconnect_state, RuntimeReconnectState::Suppressed);
+        assert_eq!(health.reconnect_suppression_count, 1);
+        assert!(health.listener_registry_healthy);
+        assert!(health.session_registry_healthy);
     }
 
     #[tokio::test]

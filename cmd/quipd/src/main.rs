@@ -8,16 +8,16 @@ use crypto::IdentityKeypair;
 use daemonapi::{
     AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus, ErrorCode, IdentityStatus,
     RequestEnvelope, ResponseEnvelope, RuntimeEventEntry, RuntimeEventsListResult,
+    RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
     RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry,
     RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary, SessionClosePayload,
     SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
     SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
     SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
-use fabric::SessionLifecycleTransport;
 use fabric::{
-    DaemonConfig, LocalControlPlane, PathSource, ProtocolId, RuntimePathAlternative,
-    RuntimePathSnapshot, RuntimePathState, SessionSnapshot, TrafficClass,
+    DaemonConfig, LocalControlPlane, PathSource, ProtocolId, RuntimeHealthLevel,
+    RuntimePathAlternative, RuntimePathSnapshot, RuntimePathState, SessionSnapshot, TrafficClass,
 };
 use identity::{FileKeystore, IdentityKeystore};
 use quic::QuicTransportAdapter;
@@ -641,7 +641,9 @@ fn route_control_request(
             runtime_status_response(args, control, transport, local_identity, envelope)
         }
         "runtime.sessions.list" => runtime_sessions_response(control, transport, envelope),
+        "runtime.listeners.list" => runtime_listeners_response(control, transport, envelope),
         "runtime.paths.list" => runtime_paths_response(control, transport, envelope),
+        "runtime.health" => runtime_health_response(control, transport, envelope),
         "runtime.events.list" => runtime_events_response(control, transport, envelope),
         "session.connect" => runtime.block_on(session_connect_response(
             control,
@@ -719,29 +721,18 @@ fn runtime_status_response(
     local_identity: &IdentityKeypair,
     envelope: RequestEnvelope,
 ) -> ResponseEnvelope {
-    let active_path_count = control
-        .runtime_paths(transport)
-        .map(|paths| {
-            paths
-                .into_iter()
-                .filter(|path| path.session_id.is_some())
-                .count()
-        })
-        .unwrap_or(0);
-    let reconnect_state = match transport.reconnect_suppressions() {
-        Ok(suppressions) if !suppressions.is_empty() => "suppressed".to_string(),
-        Ok(_) => "idle".to_string(),
-        Err(_) => "failed".to_string(),
-    };
     match control
         .ensure_identity_bound_state(local_identity)
-        .and_then(|_| control.sync_runtime_sessions(transport))
-    {
-        Ok(state) => ResponseEnvelope::success(
+        .and_then(|_| {
+            let state = control.sync_runtime_sessions(transport)?;
+            let health = control.runtime_health(transport)?;
+            Ok((state, health))
+        }) {
+        Ok((state, health)) => ResponseEnvelope::success(
             envelope.request_id,
             RuntimeStatusResult {
                 truth_kind: "runtime".to_string(),
-                daemon_health: "ready".to_string(),
+                daemon_health: runtime_health_level_label(&health.daemon_readiness).to_string(),
                 identity: IdentityStatus {
                     status: "loaded".to_string(),
                     path: args.identity_path.clone(),
@@ -758,8 +749,9 @@ fn runtime_status_response(
                 },
                 runtime_summary: RuntimeSummary {
                     session_count: state.active_sessions().len(),
-                    active_path_count,
-                    reconnect_state,
+                    active_path_count: health.active_paths,
+                    reconnect_state: runtime_reconnect_state_label(&health.reconnect_state)
+                        .to_string(),
                 },
             },
         ),
@@ -820,6 +812,23 @@ fn runtime_events_response(
     }
 }
 
+fn runtime_listeners_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.runtime_listeners(transport) {
+        Ok(listeners) => ResponseEnvelope::success(
+            envelope.request_id,
+            RuntimeListenersListResult {
+                truth_kind: "runtime".to_string(),
+                listeners: listeners.into_iter().map(runtime_listener_entry).collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
 fn runtime_paths_response(
     control: &LocalControlPlane,
     transport: &QuicTransportAdapter,
@@ -831,6 +840,41 @@ fn runtime_paths_response(
             RuntimePathsListResult {
                 truth_kind: "runtime".to_string(),
                 paths: paths.into_iter().map(runtime_path_entry).collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn runtime_health_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.runtime_health(transport) {
+        Ok(health) => ResponseEnvelope::success(
+            envelope.request_id,
+            RuntimeHealthResult {
+                truth_kind: "runtime".to_string(),
+                daemon_readiness: runtime_health_level_label(&health.daemon_readiness).to_string(),
+                authority_sync_health: runtime_health_level_label(&health.authority_sync_health)
+                    .to_string(),
+                runtime_registry_health: runtime_health_level_label(
+                    &health.runtime_registry_health,
+                )
+                .to_string(),
+                path_manager_health: runtime_health_level_label(&health.path_manager_health)
+                    .to_string(),
+                reconnect_subsystem_health: runtime_health_level_label(
+                    &health.reconnect_subsystem_health,
+                )
+                .to_string(),
+                active_sessions: health.active_sessions,
+                active_paths: health.active_paths,
+                active_listeners: health.active_listeners,
+                reconnect_state: runtime_reconnect_state_label(&health.reconnect_state).to_string(),
+                reconnect_suppression_count: health.reconnect_suppression_count,
+                runtime_event_buffer_depth: health.runtime_event_buffer_depth,
             },
         ),
         Err(error) => daemon_error_response(envelope.request_id, &error),
@@ -1072,6 +1116,18 @@ fn runtime_session_entry(session: &SessionSnapshot) -> RuntimeSessionEntry {
     }
 }
 
+fn runtime_listener_entry(listener: fabric::RuntimeListenerSnapshot) -> RuntimeListenerEntry {
+    RuntimeListenerEntry {
+        listener_id: listener.listener_id,
+        transport: listener.transport,
+        bind_summary: listener.bind_summary,
+        protocol: listener.protocol.as_str().to_string(),
+        advertise: listener.advertise,
+        state: runtime_listener_state_label(&listener.state).to_string(),
+        age_seconds: current_unix_secs().saturating_sub(listener.started_at_unix_secs),
+    }
+}
+
 fn runtime_path_entry(path: RuntimePathSnapshot) -> RuntimePathEntry {
     RuntimePathEntry {
         session_id: path
@@ -1225,6 +1281,31 @@ fn runtime_path_state_label(state: &RuntimePathState) -> &'static str {
         RuntimePathState::Migrating => "migrating",
         RuntimePathState::Failed => "failed",
         RuntimePathState::Suppressed => "suppressed",
+    }
+}
+
+fn runtime_listener_state_label(state: &fabric::RuntimeListenerState) -> &'static str {
+    match state {
+        fabric::RuntimeListenerState::Active => "active",
+        fabric::RuntimeListenerState::Failed => "failed",
+    }
+}
+
+fn runtime_health_level_label(level: &RuntimeHealthLevel) -> &'static str {
+    match level {
+        RuntimeHealthLevel::Ready => "ready",
+        RuntimeHealthLevel::Degraded => "degraded",
+        RuntimeHealthLevel::Failed => "failed",
+        RuntimeHealthLevel::Suppressed => "suppressed",
+    }
+}
+
+fn runtime_reconnect_state_label(state: &fabric::RuntimeReconnectState) -> &'static str {
+    match state {
+        fabric::RuntimeReconnectState::Idle => "idle",
+        fabric::RuntimeReconnectState::Active => "active",
+        fabric::RuntimeReconnectState::Suppressed => "suppressed",
+        fabric::RuntimeReconnectState::Failed => "failed",
     }
 }
 

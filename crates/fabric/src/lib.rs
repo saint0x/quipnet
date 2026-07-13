@@ -210,6 +210,30 @@ pub struct RuntimePathSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeHealthLevel {
+    Ready,
+    Degraded,
+    Failed,
+    Suppressed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeHealthReport {
+    pub daemon_readiness: RuntimeHealthLevel,
+    pub authority_sync_health: RuntimeHealthLevel,
+    pub runtime_registry_health: RuntimeHealthLevel,
+    pub path_manager_health: RuntimeHealthLevel,
+    pub reconnect_subsystem_health: RuntimeHealthLevel,
+    pub active_sessions: usize,
+    pub active_paths: usize,
+    pub active_listeners: usize,
+    pub reconnect_state: RuntimeReconnectState,
+    pub reconnect_suppression_count: usize,
+    pub runtime_event_buffer_depth: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DurableStateValidationReport {
     pub schema_version: u64,
     pub state_path: PathBuf,
@@ -1438,6 +1462,69 @@ impl LocalControlPlane {
         Ok(snapshots)
     }
 
+    pub fn runtime_listeners<T>(
+        &self,
+        transport: &T,
+    ) -> Result<Vec<RuntimeListenerSnapshot>, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        transport.active_listeners().map_err(Into::into)
+    }
+
+    pub fn runtime_health<T>(&self, transport: &T) -> Result<RuntimeHealthReport, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let state = self.ensure_state()?;
+        let transport_health = transport.transport_health()?;
+        let active_paths = self
+            .runtime_paths(transport)?
+            .into_iter()
+            .filter(|path| path.session_id.is_some())
+            .count();
+        let authority_sync_health = if state.deny_reason(&state.local_peer_id).is_some() {
+            RuntimeHealthLevel::Degraded
+        } else {
+            RuntimeHealthLevel::Ready
+        };
+        let runtime_registry_health = if transport_health.session_registry_healthy
+            && transport_health.listener_registry_healthy
+        {
+            RuntimeHealthLevel::Ready
+        } else {
+            RuntimeHealthLevel::Failed
+        };
+        let path_manager_health = if transport_health.active_sessions > 0 && active_paths == 0 {
+            RuntimeHealthLevel::Failed
+        } else if active_paths < transport_health.active_sessions {
+            RuntimeHealthLevel::Degraded
+        } else {
+            RuntimeHealthLevel::Ready
+        };
+        let reconnect_subsystem_health =
+            runtime_reconnect_health_level(&transport_health.reconnect_state);
+        let daemon_readiness = runtime_rollup_health(&[
+            authority_sync_health.clone(),
+            runtime_registry_health.clone(),
+            path_manager_health.clone(),
+            reconnect_subsystem_health.clone(),
+        ]);
+        Ok(RuntimeHealthReport {
+            daemon_readiness,
+            authority_sync_health,
+            runtime_registry_health,
+            path_manager_health,
+            reconnect_subsystem_health,
+            active_sessions: transport_health.active_sessions,
+            active_paths,
+            active_listeners: transport_health.active_listeners,
+            reconnect_state: transport_health.reconnect_state,
+            reconnect_suppression_count: transport_health.reconnect_suppression_count,
+            runtime_event_buffer_depth: transport_health.event_buffer_depth,
+        })
+    }
+
     pub async fn reevaluate_runtime_authority<T>(
         &self,
         transport: &T,
@@ -1822,6 +1909,36 @@ fn runtime_class_rank(class: TrafficClass) -> u8 {
         TrafficClass::Interactive => 1,
         TrafficClass::Bulk => 2,
         TrafficClass::Background => 3,
+    }
+}
+
+fn runtime_reconnect_health_level(state: &RuntimeReconnectState) -> RuntimeHealthLevel {
+    match state {
+        RuntimeReconnectState::Idle => RuntimeHealthLevel::Ready,
+        RuntimeReconnectState::Active => RuntimeHealthLevel::Degraded,
+        RuntimeReconnectState::Suppressed => RuntimeHealthLevel::Suppressed,
+        RuntimeReconnectState::Failed => RuntimeHealthLevel::Failed,
+    }
+}
+
+fn runtime_rollup_health(levels: &[RuntimeHealthLevel]) -> RuntimeHealthLevel {
+    if levels
+        .iter()
+        .any(|level| *level == RuntimeHealthLevel::Failed)
+    {
+        RuntimeHealthLevel::Failed
+    } else if levels
+        .iter()
+        .any(|level| *level == RuntimeHealthLevel::Suppressed)
+    {
+        RuntimeHealthLevel::Suppressed
+    } else if levels
+        .iter()
+        .any(|level| *level == RuntimeHealthLevel::Degraded)
+    {
+        RuntimeHealthLevel::Degraded
+    } else {
+        RuntimeHealthLevel::Ready
     }
 }
 
@@ -3472,6 +3589,64 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("no active capability grants"));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn runtime_health_reports_listener_and_suppression_state() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-runtime-health-state");
+        let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
+            "runtime-health-prod",
+            &state_path,
+            97,
+            98,
+            b"runtime-health-runtime",
+            b"runtime-health-target",
+        )
+        .await;
+        transport
+            .listen(BindSpec {
+                protocol: session.protocol.clone().expect("protocol should exist"),
+                advertise: true,
+            })
+            .await
+            .expect("listener should register");
+
+        let ready = control
+            .runtime_health(&transport)
+            .expect("runtime health should render");
+        assert_eq!(ready.daemon_readiness, RuntimeHealthLevel::Ready);
+        assert_eq!(ready.active_sessions, 1);
+        assert_eq!(ready.active_paths, 1);
+        assert_eq!(ready.active_listeners, 1);
+        assert_eq!(ready.reconnect_state, RuntimeReconnectState::Idle);
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.capability_grants.clear();
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+        control
+            .reevaluate_runtime_authority(&transport)
+            .await
+            .expect("authority reevaluation should succeed");
+
+        let suppressed = control
+            .runtime_health(&transport)
+            .expect("suppressed health should render");
+        assert_eq!(suppressed.daemon_readiness, RuntimeHealthLevel::Suppressed);
+        assert_eq!(
+            suppressed.reconnect_subsystem_health,
+            RuntimeHealthLevel::Suppressed
+        );
+        assert_eq!(
+            suppressed.reconnect_state,
+            RuntimeReconnectState::Suppressed
+        );
+        assert_eq!(suppressed.reconnect_suppression_count, 1);
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();

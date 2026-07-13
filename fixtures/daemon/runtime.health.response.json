@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "request_id": "req-runtime-health-1",
+  "result": {
+    "truth_kind": "runtime",
+    "daemon_readiness": "suppressed",
+    "authority_sync_health": "ready",
+    "runtime_registry_health": "ready",
+    "path_manager_health": "ready",
+    "reconnect_subsystem_health": "suppressed",
+    "active_sessions": 0,
+    "active_paths": 0,
+    "active_listeners": 1,
+    "reconnect_state": "suppressed",
+    "reconnect_suppression_count": 1,
+    "runtime_event_buffer_depth": 12
+  },
+  "error": null
+}

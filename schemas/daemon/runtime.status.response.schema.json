@@ -22,7 +22,7 @@
             },
             "daemon_health": {
               "type": "string",
-              "enum": ["ready", "degraded", "failed", "starting"]
+              "enum": ["ready", "degraded", "failed", "starting", "suppressed"]
             },
             "identity": {
               "type": "object",

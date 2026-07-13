@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 use crypto::IdentityKeypair;
 use daemonapi::{
     AuthKind, DaemonEndpointDiscovery, RequestAuth, RequestEnvelope, ResponseEnvelope,
-    RuntimeEventsListResult, RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
+    RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
+    RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
     RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
     SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
     SessionUpgradePayload, SessionUpgradeResult,
@@ -126,7 +127,9 @@ enum PathCommand {
 #[derive(Subcommand, Debug)]
 enum RuntimeCommand {
     Sessions,
+    Listeners,
     Paths,
+    Health,
     Events {
         #[arg(long, default_value_t = 32)]
         limit: usize,
@@ -346,6 +349,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            RuntimeCommand::Listeners => {
+                let listeners = daemon_request::<RuntimeListenersListResult>(
+                    &cli,
+                    "runtime.listeners.list",
+                    json!({}),
+                )?;
+                emit_runtime_listeners(&listeners);
+            }
             RuntimeCommand::Paths => {
                 let paths = daemon_request::<RuntimePathsListResult>(
                     &cli,
@@ -353,6 +364,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     json!({}),
                 )?;
                 emit_runtime_paths(&paths);
+            }
+            RuntimeCommand::Health => {
+                let health =
+                    daemon_request::<RuntimeHealthResult>(&cli, "runtime.health", json!({}))?;
+                emit_runtime_health(&health);
             }
             RuntimeCommand::Events { limit } => {
                 let events = daemon_request::<RuntimeEventsListResult>(
@@ -881,6 +897,37 @@ fn emit_runtime_paths(paths: &RuntimePathsListResult) {
     emit_filtered_runtime_paths(&paths.truth_kind, &paths.paths);
 }
 
+fn emit_runtime_listeners(listeners: &RuntimeListenersListResult) {
+    if listeners.listeners.is_empty() {
+        println!("truth_kind={} listeners=0", listeners.truth_kind);
+    } else {
+        for listener in &listeners.listeners {
+            println!(
+                "{}",
+                render_runtime_listener_line(listener, &listeners.truth_kind)
+            );
+        }
+    }
+}
+
+fn emit_runtime_health(health: &RuntimeHealthResult) {
+    println!(
+        "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
+        health.daemon_readiness,
+        health.authority_sync_health,
+        health.runtime_registry_health,
+        health.path_manager_health,
+        health.reconnect_subsystem_health,
+        health.active_sessions,
+        health.active_paths,
+        health.active_listeners,
+        health.reconnect_state,
+        health.reconnect_suppression_count,
+        health.runtime_event_buffer_depth,
+        health.truth_kind
+    );
+}
+
 fn emit_filtered_runtime_paths(truth_kind: &str, paths: &[RuntimePathEntry]) {
     if paths.is_empty() {
         println!("truth_kind={} paths=0", truth_kind);
@@ -906,6 +953,20 @@ fn filter_runtime_paths(
         })
         .cloned()
         .collect()
+}
+
+fn render_runtime_listener_line(listener: &RuntimeListenerEntry, truth_kind: &str) -> String {
+    format!(
+        "listener_id={} transport={} protocol={} advertise={} state={} bind_summary={} age_seconds={} truth_kind={}",
+        listener.listener_id,
+        listener.transport,
+        listener.protocol,
+        listener.advertise,
+        listener.state,
+        listener.bind_summary,
+        listener.age_seconds,
+        truth_kind
+    )
 }
 
 fn render_runtime_path_watch_snapshot(
@@ -1344,6 +1405,26 @@ mod tests {
     }
 
     #[test]
+    fn render_runtime_listener_line_includes_listener_truth() {
+        let line = render_runtime_listener_line(
+            &RuntimeListenerEntry {
+                listener_id: "lst-1234".to_string(),
+                transport: "quic".to_string(),
+                bind_summary: "protocol=/quicnet/control/1 advertise=true".to_string(),
+                protocol: "/quicnet/control/1".to_string(),
+                advertise: true,
+                state: "active".to_string(),
+                age_seconds: 7,
+            },
+            "runtime",
+        );
+
+        assert!(line.contains("listener_id=lst-1234"));
+        assert!(line.contains("transport=quic"));
+        assert!(line.contains("truth_kind=runtime"));
+    }
+
+    #[test]
     fn filter_runtime_paths_limits_by_peer_and_class() {
         let paths = vec![
             RuntimePathEntry {
@@ -1384,6 +1465,43 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].peer_id, "peer-b");
         assert_eq!(filtered[0].class, "interactive");
+    }
+
+    #[test]
+    fn emit_runtime_health_uses_stable_operator_surface() {
+        let health = RuntimeHealthResult {
+            truth_kind: "runtime".to_string(),
+            daemon_readiness: "suppressed".to_string(),
+            authority_sync_health: "ready".to_string(),
+            runtime_registry_health: "ready".to_string(),
+            path_manager_health: "ready".to_string(),
+            reconnect_subsystem_health: "suppressed".to_string(),
+            active_sessions: 0,
+            active_paths: 0,
+            active_listeners: 1,
+            reconnect_state: "suppressed".to_string(),
+            reconnect_suppression_count: 1,
+            runtime_event_buffer_depth: 12,
+        };
+
+        let rendered = format!(
+            "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
+            health.daemon_readiness,
+            health.authority_sync_health,
+            health.runtime_registry_health,
+            health.path_manager_health,
+            health.reconnect_subsystem_health,
+            health.active_sessions,
+            health.active_paths,
+            health.active_listeners,
+            health.reconnect_state,
+            health.reconnect_suppression_count,
+            health.runtime_event_buffer_depth,
+            health.truth_kind
+        );
+
+        assert!(rendered.contains("daemon_readiness=suppressed"));
+        assert!(rendered.contains("reconnect_suppressions=1"));
     }
 
     #[test]

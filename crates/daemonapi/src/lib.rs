@@ -136,6 +136,23 @@ pub struct RuntimeSessionsListResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeListenersListResult {
+    pub truth_kind: String,
+    pub listeners: Vec<RuntimeListenerEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeListenerEntry {
+    pub listener_id: String,
+    pub transport: String,
+    pub bind_summary: String,
+    pub protocol: String,
+    pub advertise: bool,
+    pub state: String,
+    pub age_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimePathsListResult {
     pub truth_kind: String,
     pub paths: Vec<RuntimePathEntry>,
@@ -193,6 +210,22 @@ pub struct RuntimeEventEntry {
     pub subject_kind: String,
     pub subject_id: String,
     pub details: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeHealthResult {
+    pub truth_kind: String,
+    pub daemon_readiness: String,
+    pub authority_sync_health: String,
+    pub runtime_registry_health: String,
+    pub path_manager_health: String,
+    pub reconnect_subsystem_health: String,
+    pub active_sessions: usize,
+    pub active_paths: usize,
+    pub active_listeners: usize,
+    pub reconnect_state: String,
+    pub reconnect_suppression_count: usize,
+    pub runtime_event_buffer_depth: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

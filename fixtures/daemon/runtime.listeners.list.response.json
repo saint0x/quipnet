@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "request_id": "req-runtime-listeners-1",
+  "result": {
+    "truth_kind": "runtime",
+    "listeners": [
+      {
+        "listener_id": "lst-4a2dd77cb5719fa2",
+        "transport": "quic",
+        "bind_summary": "protocol=/quicnet/control/1 advertise=true",
+        "protocol": "/quicnet/control/1",
+        "advertise": true,
+        "state": "active",
+        "age_seconds": 3
+      }
+    ]
+  },
+  "error": null
+}
