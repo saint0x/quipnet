@@ -50,6 +50,24 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
+      "args": ["run", "-p", "quip", "--", "authority", "membership"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["run", "-p", "quip", "--", "authority", "capabilities"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
       "args": ["run", "-p", "quipd", "--", "--one-shot", "--force-network-reprobe", "--network-change-trigger-path", "/tmp/quip-network-change.trigger"],
       "exit_code": 0,
       "stdout": "",

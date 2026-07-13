@@ -118,6 +118,9 @@ enum StateCommand {
 #[derive(Subcommand, Debug)]
 enum AuthorityCommand {
     Show,
+    Membership,
+    Capabilities,
+    Revocations,
     SyncSnapshot {
         #[arg(long)]
         authority_snapshot: String,
@@ -398,6 +401,69 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     state.schema_version
                 );
             }
+            AuthorityCommand::Membership => {
+                let state = control.ensure_state()?;
+                println!(
+                    "network={} subject_peer={} issuer_peer={} issued_at={} expires_at={} roles={} schema_version={} durable_only=true",
+                    state.network,
+                    state.membership.subject_peer_id,
+                    state.membership.issuer_peer_id,
+                    state.membership.issued_at,
+                    state.membership.expires_at,
+                    render_roles(&state.membership.roles),
+                    state.schema_version
+                );
+            }
+            AuthorityCommand::Capabilities => {
+                let state = control.ensure_state()?;
+                let grants = state.grants_for_peer(&state.local_peer_id);
+                if grants.is_empty() {
+                    println!(
+                        "network={} subject_peer={} active_grants=0 schema_version={} durable_only=true",
+                        state.network, state.local_peer_id, state.schema_version
+                    );
+                } else {
+                    for grant in grants {
+                        println!(
+                            "network={} subject_peer={} issuer_peer={} sequence={} not_before={} expires_at={} capabilities={} protocols={} limits={} constraints={} schema_version={} durable_only=true",
+                            state.network,
+                            grant.subject_peer_id,
+                            grant.issuer_peer_id,
+                            grant.sequence,
+                            grant.not_before,
+                            grant.expires_at,
+                            render_csv(&grant.capabilities),
+                            render_protocols(&grant.protocol_scopes),
+                            render_limits(&grant.resource_limits),
+                            render_csv(&grant.constraints),
+                            state.schema_version
+                        );
+                    }
+                }
+            }
+            AuthorityCommand::Revocations => {
+                let state = control.ensure_state()?;
+                if state.revocations.is_empty() {
+                    println!(
+                        "network={} revocations=0 schema_version={} durable_only=true",
+                        state.network, state.schema_version
+                    );
+                } else {
+                    for revocation in &state.revocations {
+                        println!(
+                            "network={} sequence={} issuer_peer={} effective_at={} reason={} target={} note={} schema_version={} durable_only=true",
+                            state.network,
+                            revocation.sequence,
+                            revocation.issuer_peer_id,
+                            revocation.effective_at,
+                            render_revocation_reason(&revocation.reason),
+                            render_revocation_target(&revocation.target),
+                            revocation.note.as_deref().unwrap_or("none"),
+                            state.schema_version
+                        );
+                    }
+                }
+            }
             AuthorityCommand::SyncSnapshot { authority_snapshot } => {
                 let (state, report) = control.sync_authority_snapshot(&authority_snapshot)?;
                 println!(
@@ -566,8 +632,80 @@ fn render_path_alternatives(
         .collect()
 }
 
+fn render_roles(roles: &[String]) -> String {
+    render_csv(roles)
+}
+
+fn render_csv(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_string()
+    } else {
+        values.join(",")
+    }
+}
+
+fn render_protocols(protocols: &[ProtocolId]) -> String {
+    if protocols.is_empty() {
+        "none".to_string()
+    } else {
+        protocols
+            .iter()
+            .map(ProtocolId::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn render_limits(limits: &membership::ResourceLimits) -> String {
+    format!(
+        "bandwidth_bps:{}|concurrent_streams:{}|max_object_bytes:{}",
+        limits
+            .bandwidth_bps
+            .map(|value: u64| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        limits
+            .concurrent_streams
+            .map(|value: u32| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        limits
+            .max_object_bytes
+            .map(|value: u64| value.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_revocation_reason(reason: &membership::RevocationReason) -> &'static str {
+    match reason {
+        membership::RevocationReason::Administrative => "administrative",
+        membership::RevocationReason::KeyCompromise => "key_compromise",
+        membership::RevocationReason::Superseded => "superseded",
+        membership::RevocationReason::Unspecified => "unspecified",
+    }
+}
+
+fn render_revocation_target(target: &membership::RevocationTarget) -> String {
+    match target {
+        membership::RevocationTarget::EnrollmentToken { token_id } => {
+            format!("enrollment_token:{}", hex_bytes(token_id))
+        }
+        membership::RevocationTarget::MembershipCertificate {
+            subject_peer_id,
+            issued_at,
+        } => format!("membership_certificate:{subject_peer_id}:{issued_at}"),
+        membership::RevocationTarget::CapabilityGrant {
+            subject_peer_id,
+            sequence,
+        } => format!("capability_grant:{subject_peer_id}:{sequence}"),
+        membership::RevocationTarget::Peer { peer_id } => format!("peer:{peer_id}"),
+    }
+}
+
 fn hex_session_id(session_id: &[u8; 16]) -> String {
-    session_id
+    hex_bytes(session_id)
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
@@ -772,6 +910,47 @@ mod tests {
 
         assert!(output.contains("durable_only=true"));
         assert!(output.contains("schema_version="));
+    }
+
+    #[test]
+    fn render_protocols_and_csv_use_none_for_empty_values() {
+        assert_eq!(render_csv(&[]), "none");
+        assert_eq!(render_protocols(&[]), "none");
+    }
+
+    #[test]
+    fn render_limits_outputs_stable_operator_surface() {
+        let limits = membership::ResourceLimits {
+            bandwidth_bps: Some(1_000),
+            concurrent_streams: None,
+            max_object_bytes: Some(4_096),
+        };
+
+        assert_eq!(
+            render_limits(&limits),
+            "bandwidth_bps:1000|concurrent_streams:none|max_object_bytes:4096"
+        );
+    }
+
+    #[test]
+    fn render_revocation_target_formats_peer_and_grant_targets() {
+        let peer = fabric::fixture_daemon_state("revocation-format-cli").local_peer_id;
+        let peer_target = membership::RevocationTarget::Peer {
+            peer_id: peer.clone(),
+        };
+        let grant_target = membership::RevocationTarget::CapabilityGrant {
+            subject_peer_id: peer.clone(),
+            sequence: 7,
+        };
+
+        assert_eq!(
+            render_revocation_target(&peer_target),
+            format!("peer:{peer}")
+        );
+        assert_eq!(
+            render_revocation_target(&grant_target),
+            format!("capability_grant:{peer}:7")
+        );
     }
 
     #[test]

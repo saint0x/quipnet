@@ -11,6 +11,7 @@ crypto = { path = "../../crates/crypto" }
 identity = { path = "../../crates/identity" }
 observability = { path = "../../crates/observability" }
 fabric = { path = "../../crates/fabric" }
+membership = { path = "../../crates/membership" }
 quic = { path = "../../crates/quic" }
 rand.workspace = true
 tokio.workspace = true

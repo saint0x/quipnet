@@ -1005,6 +1005,7 @@ dependencies = [
  "crypto",
  "fabric",
  "identity",
+ "membership",
  "observability",
  "quic",
  "rand",
