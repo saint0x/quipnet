@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use crypto::{IdentityKeypair, SessionKeypair};
@@ -23,6 +24,12 @@ pub struct QuicListenerHandle {
     pub advertise: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeSessionRecord {
+    snapshot: SessionSnapshot,
+    alpn_protocol: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct QuicTransportAdapter {
     pub implementation: &'static str,
@@ -31,6 +38,7 @@ pub struct QuicTransportAdapter {
     pub network_id: Option<NetworkId>,
     pub local_identity: Option<IdentityKeypair>,
     relay_control: Arc<dyn RelayControl>,
+    runtime_sessions: Arc<RwLock<BTreeMap<[u8; 16], RuntimeSessionRecord>>>,
 }
 
 impl Default for QuicTransportAdapter {
@@ -42,6 +50,7 @@ impl Default for QuicTransportAdapter {
             network_id: None,
             local_identity: None,
             relay_control: Arc::new(HttpRelayControl),
+            runtime_sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 }
@@ -59,6 +68,22 @@ impl QuicTransportAdapter {
         self.relay_control = relay_control;
         self
     }
+
+    pub fn active_sessions(&self) -> Vec<SessionSnapshot> {
+        self.runtime_sessions
+            .read()
+            .expect("runtime session registry should remain readable")
+            .values()
+            .map(|record| record.snapshot.clone())
+            .collect()
+    }
+
+    pub fn owns_session(&self, session_id: &[u8; 16]) -> bool {
+        self.runtime_sessions
+            .read()
+            .expect("runtime session registry should remain readable")
+            .contains_key(session_id)
+    }
 }
 
 #[async_trait]
@@ -68,9 +93,15 @@ impl SecureTransport for QuicTransportAdapter {
 
     async fn connect(&self, route: RoutePlan) -> Result<Self::Connection, TransportError> {
         let session = session_snapshot_for_route(self, &route)?;
+        let alpn_protocol = route.protocol.map(|id| id.as_str().to_string());
+        let record = RuntimeSessionRecord {
+            snapshot: session.clone(),
+            alpn_protocol: alpn_protocol.clone(),
+        };
+        upsert_runtime_session(self, record)?;
         Ok(QuicConnectionHandle {
             session,
-            alpn_protocol: route.protocol.map(|id| id.as_str().to_string()),
+            alpn_protocol,
         })
     }
 
@@ -84,17 +115,32 @@ impl SecureTransport for QuicTransportAdapter {
 
 #[async_trait]
 impl SessionLifecycleTransport for QuicTransportAdapter {
+    fn session_snapshot(
+        &self,
+        session_id: &[u8; 16],
+    ) -> Result<Option<SessionSnapshot>, TransportError> {
+        Ok(self
+            .runtime_sessions
+            .read()
+            .expect("runtime session registry should remain readable")
+            .get(session_id)
+            .map(|record| record.snapshot.clone()))
+    }
+
     async fn migrate(
         &self,
         session: &SessionSnapshot,
         route: RoutePlan,
     ) -> Result<SessionSnapshot, TransportError> {
+        let existing = self.session_snapshot(&session.session_id)?.ok_or_else(|| {
+            TransportError::InvalidRoute("session is not active in runtime registry".into())
+        })?;
         let mut migrated = session_snapshot_for_route(self, &route)?;
-        let previous_transport_session_id = session.transport_session_id;
-        let previous_control_endpoint = session.relay_control_endpoint.clone();
-        let previous_path_kind = session.path_kind;
+        let previous_transport_session_id = existing.transport_session_id;
+        let previous_control_endpoint = existing.relay_control_endpoint.clone();
+        let previous_path_kind = existing.path_kind;
 
-        migrated.session_id = session.session_id;
+        migrated.session_id = existing.session_id;
 
         if previous_path_kind == model::PathKind::Relay
             && (migrated.path_kind != model::PathKind::Relay
@@ -108,10 +154,21 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             )?;
         }
 
+        upsert_runtime_session(
+            self,
+            RuntimeSessionRecord {
+                snapshot: migrated.clone(),
+                alpn_protocol: route.protocol.map(|id| id.as_str().to_string()),
+            },
+        )?;
         Ok(migrated)
     }
 
     async fn close_session(&self, session: &SessionSnapshot) -> Result<(), TransportError> {
+        let Some(active) = remove_runtime_session(self, &session.session_id)? else {
+            return Ok(());
+        };
+        let session = active.snapshot;
         if session.path_kind == model::PathKind::Relay {
             close_relay_transport_session(
                 &*self.relay_control,
@@ -269,6 +326,42 @@ fn logical_session_id(route: &RoutePlan) -> [u8; 16] {
     session_id
 }
 
+fn upsert_runtime_session(
+    adapter: &QuicTransportAdapter,
+    record: RuntimeSessionRecord,
+) -> Result<(), TransportError> {
+    let mut sessions = adapter
+        .runtime_sessions
+        .write()
+        .expect("runtime session registry should remain writable");
+    if let Some(previous) = sessions.insert(record.snapshot.session_id, record.clone()) {
+        if previous.snapshot.path_kind == model::PathKind::Relay
+            && (previous.snapshot.transport_session_id != record.snapshot.transport_session_id
+                || previous.snapshot.relay_control_endpoint
+                    != record.snapshot.relay_control_endpoint
+                || record.snapshot.path_kind != model::PathKind::Relay)
+        {
+            close_relay_transport_session(
+                &*adapter.relay_control,
+                previous.snapshot.relay_control_endpoint.as_deref(),
+                previous.snapshot.transport_session_id,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_runtime_session(
+    adapter: &QuicTransportAdapter,
+    session_id: &[u8; 16],
+) -> Result<Option<RuntimeSessionRecord>, TransportError> {
+    Ok(adapter
+        .runtime_sessions
+        .write()
+        .expect("runtime session registry should remain writable")
+        .remove(session_id))
+}
+
 fn close_relay_transport_session(
     relay_control: &dyn RelayControl,
     control_endpoint: Option<&str>,
@@ -342,6 +435,7 @@ mod tests {
         assert_eq!(handle.session.peer, peer);
         assert!(handle.session.migration_capable);
         assert!(handle.session.relay_peer.is_none());
+        assert!(adapter.owns_session(&handle.session.session_id));
     }
 
     #[tokio::test]
@@ -543,6 +637,7 @@ mod tests {
         adapter.close_session(&handle.session).await.unwrap();
 
         assert_eq!(registered_session_count(&relay), Some(0));
+        assert!(!adapter.owns_session(&handle.session.session_id));
     }
 
     #[tokio::test]
@@ -629,5 +724,59 @@ mod tests {
         assert!(migrated.relay_endpoint.is_none());
         assert!(migrated.relay_control_endpoint.is_none());
         assert_eq!(registered_session_count(&relay), Some(0));
+        assert!(adapter.owns_session(&migrated.session_id));
+        assert_eq!(
+            adapter
+                .session_snapshot(&migrated.session_id)
+                .expect("runtime snapshot should resolve")
+                .expect("migrated session should remain active")
+                .path_kind,
+            PathKind::DirectUdp
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_rejects_migration_for_session_missing_from_runtime_registry() {
+        let local_identity = IdentityKeypair::from_secret_bytes([58_u8; 32]);
+        let local = local_identity.peer_id();
+        let adapter =
+            QuicTransportAdapter::with_identity(NetworkId::derive("direct-test"), local_identity);
+        let session = SessionSnapshot {
+            session_id: [7_u8; 16],
+            transport_session_id: [8_u8; 16],
+            relay_attempt_id: None,
+            peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer-missing"),
+            protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+            class: TrafficClass::Control,
+            path_kind: PathKind::DirectUdp,
+            source: RouteSource::Observed,
+            remote_endpoint: "quic://198.51.100.10:8443".to_string(),
+            relay_peer: None,
+            relay_endpoint: None,
+            relay_control_endpoint: None,
+            datagrams_capable: true,
+            migration_capable: true,
+        };
+
+        let error = adapter
+            .migrate(
+                &session,
+                RoutePlan {
+                    local_peer: local,
+                    peer: session.peer.clone(),
+                    protocol: session.protocol.clone(),
+                    class: session.class,
+                    path_kind: PathKind::DirectIpv6,
+                    source: RouteSource::Observed,
+                    remote_endpoints: vec!["quic://[2001:db8::2]:8443".to_string()],
+                    relay: None,
+                },
+            )
+            .await
+            .expect_err("migration should require a runtime-owned session");
+
+        assert!(error
+            .to_string()
+            .contains("session is not active in runtime registry"));
     }
 }

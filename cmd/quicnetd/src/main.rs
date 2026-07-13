@@ -126,6 +126,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     observability::init_tracing("quicnetd");
     let args = Args::parse();
     let local_identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env)?;
+    let transport = daemon_transport(&args, &local_identity)?;
     let control = LocalControlPlane::new(DaemonConfig::new(
         args.network.clone(),
         args.state_path.clone(),
@@ -141,7 +142,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     };
 
     loop {
-        let report = run_cycle(&args, &control, &local_identity, trigger.clone()).await?;
+        let report = run_cycle(&args, &control, &local_identity, &transport, trigger.clone()).await?;
         emit_cycle_report(&args, &report);
 
         if args.one_shot {
@@ -249,6 +250,7 @@ async fn run_cycle(
     args: &Args,
     control: &LocalControlPlane,
     local_identity: &IdentityKeypair,
+    transport: &QuicTransportAdapter,
     trigger: CycleTrigger,
 ) -> Result<DaemonCycleReport, fabric::DaemonStateError> {
     let (preparation, reprobe_report, mut state) =
@@ -265,24 +267,20 @@ async fn run_cycle(
                 entries: Vec::new(),
             })
         } else {
-            let transport = daemon_transport(args, local_identity)
-                .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
-            let report = control.reconcile_sessions(&transport).await?;
+            let report = control.reconcile_sessions(transport).await?;
             state = control.ensure_state()?;
             Some(report)
         }
     };
     let (active_session, connect_status) = match args.connect_protocol.as_deref() {
         Some(protocol) => {
-            let transport = daemon_transport(args, local_identity)
-                .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
             match ensure_target_session(args, control, &state, transport, protocol).await {
                 Ok(Some(session)) => {
                     state = control.ensure_state()?;
                     (Some(session), "active".to_string())
                 }
                 Ok(None) => {
-                    let existing = existing_target_session(args, &state, protocol);
+                    let existing = existing_target_session(args, &state, transport, protocol);
                     (existing, "reused".to_string())
                 }
                 Err(error) => (None, format!("connect-failed:{error}")),
@@ -306,10 +304,10 @@ async fn ensure_target_session(
     args: &Args,
     control: &LocalControlPlane,
     state: &fabric::DaemonState,
-    transport: QuicTransportAdapter,
+    transport: &QuicTransportAdapter,
     protocol: &str,
 ) -> Result<Option<SessionSnapshot>, fabric::DaemonStateError> {
-    if let Some(session) = existing_target_session(args, state, protocol) {
+    if let Some(session) = existing_target_session(args, state, transport, protocol) {
         return Ok(Some(session));
     }
 
@@ -330,7 +328,7 @@ async fn ensure_target_session(
             &target,
             &protocol,
             parse_class(&args.connect_class),
-            &transport,
+            transport,
         )
         .await?;
     Ok(Some(session))
@@ -339,6 +337,7 @@ async fn ensure_target_session(
 fn existing_target_session(
     args: &Args,
     state: &fabric::DaemonState,
+    transport: &QuicTransportAdapter,
     protocol: &str,
 ) -> Option<SessionSnapshot> {
     let target = args
@@ -353,6 +352,7 @@ fn existing_target_session(
         .find(|session| {
             session.peer == target
                 && session.class == class
+                && transport.owns_session(&session.session_id)
                 && session
                     .protocol
                     .as_ref()

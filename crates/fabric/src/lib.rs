@@ -956,7 +956,9 @@ impl LocalControlPlane {
             .session(session_id)
             .cloned()
             .ok_or_else(|| DaemonStateError::SessionNotFound(hex_session_id(session_id)))?;
-        transport.close_session(&session).await?;
+        if transport.session_snapshot(session_id)?.is_some() {
+            transport.close_session(&session).await?;
+        }
         let state = state.without_session(session_id);
         state.save(&self.config.state_path)?;
         Ok(())
@@ -971,10 +973,15 @@ impl LocalControlPlane {
         T: SessionLifecycleTransport,
     {
         let state = self.ensure_state()?;
-        let session = state
+        let persisted = state
             .session(session_id)
             .cloned()
             .ok_or_else(|| DaemonStateError::SessionNotFound(hex_session_id(session_id)))?;
+        let session = transport.session_snapshot(session_id)?.ok_or_else(|| {
+            DaemonStateError::InvalidSession(
+                "session is not active in runtime transport".to_string(),
+            )
+        })?;
         let protocol = session.protocol.clone().ok_or_else(|| {
             DaemonStateError::InvalidSession("session has no negotiated protocol".to_string())
         })?;
@@ -984,7 +991,9 @@ impl LocalControlPlane {
         }
         let route = state.route_plan(&session.peer, Some(protocol), session.class)?;
         let upgraded = transport.migrate(&session, route).await?;
-        let state = state.with_active_session(upgraded.clone());
+        let state = state
+            .without_session(&persisted.session_id)
+            .with_active_session(upgraded.clone());
         state.save(&self.config.state_path)?;
         Ok(upgraded)
     }
@@ -1004,6 +1013,18 @@ impl LocalControlPlane {
         let mut closed = 0;
 
         for session in sessions {
+            let Some(session) = transport.session_snapshot(&session.session_id)? else {
+                state = state.without_session(&session.session_id);
+                closed += 1;
+                entries.push(SessionReconcileEntry {
+                    session_id: session.session_id,
+                    peer: session.peer,
+                    disposition: SessionReconcileDisposition::Closed,
+                    reason: "session is not active in runtime transport".to_string(),
+                    path_kind: None,
+                });
+                continue;
+            };
             let Some(protocol) = session.protocol.clone() else {
                 transport.close_session(&session).await?;
                 state = state.without_session(&session.session_id);
@@ -2759,6 +2780,42 @@ mod tests {
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();
+    }
+
+    #[tokio::test]
+    async fn reconcile_sessions_closes_persisted_session_missing_from_runtime_transport() {
+        let state_path = unique_state_path("quicnet-direct-reconcile-missing-runtime-state");
+        let (control, _transport, session, _bootstrap_peer) = establish_persisted_direct_session(
+            "direct-reconcile-missing-runtime-prod",
+            &state_path,
+            91,
+            92,
+            b"direct-reconcile-missing-runtime-target",
+        )
+        .await;
+        let fresh_transport = QuicTransportAdapter::with_identity(
+            NetworkId::derive("direct-reconcile-missing-runtime-prod"),
+            crypto::IdentityKeypair::from_secret_bytes([91_u8; 32]),
+        );
+
+        let report = control
+            .reconcile_sessions(&fresh_transport)
+            .await
+            .expect("missing runtime session should prune persisted state");
+
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert_eq!(report.examined, 1);
+        assert_eq!(report.closed, 1);
+        assert_eq!(report.upgraded, 0);
+        assert_eq!(report.unchanged, 0);
+        assert_eq!(report.entries[0].session_id, session.session_id);
+        assert_eq!(
+            report.entries[0].reason,
+            "session is not active in runtime transport"
+        );
+        assert!(persisted.active_sessions.is_empty());
+
+        let _ = std::fs::remove_file(state_path);
     }
 
     #[test]

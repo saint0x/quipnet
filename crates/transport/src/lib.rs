@@ -99,6 +99,11 @@ pub trait SecureTransport: Send + Sync {
 
 #[async_trait]
 pub trait SessionLifecycleTransport: SecureTransport {
+    fn session_snapshot(
+        &self,
+        session_id: &[u8; 16],
+    ) -> Result<Option<SessionSnapshot>, TransportError>;
+
     async fn migrate(
         &self,
         session: &SessionSnapshot,
