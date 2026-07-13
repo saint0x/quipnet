@@ -1,15 +1,27 @@
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use crypto::IdentityKeypair;
+use daemonapi::{
+    AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus, ErrorCode, IdentityStatus,
+    RequestEnvelope, ResponseEnvelope, RuntimeSessionEntry, RuntimeSessionsListResult,
+    RuntimeStatusResult, RuntimeSummary, SessionClosePayload, SessionCloseResult,
+    SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
+    SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
+    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
+};
 use fabric::{DaemonConfig, LocalControlPlane, ProtocolId, SessionSnapshot, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
 use quic::QuicTransportAdapter;
 use rand::rngs::OsRng;
+use serde_json::json;
 use std::error::Error;
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 struct Args {
     #[arg(long, default_value = "personalcloud-prod")]
     network: String,
@@ -19,6 +31,12 @@ struct Args {
 
     #[arg(long, default_value = "~/.quip/identity/node.json")]
     identity_path: String,
+
+    #[arg(long, default_value = "~/.quip/run/control.json")]
+    control_discovery_path: String,
+
+    #[arg(long, default_value = "127.0.0.1:0")]
+    control_bind: String,
 
     #[arg(long, default_value = "QUIP_IDENTITY_PASSPHRASE")]
     identity_passphrase_env: String,
@@ -124,13 +142,15 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     observability::init_tracing("quipd");
-    let args = Args::parse();
+    let mut args = Args::parse();
+    normalize_args_paths(&mut args);
     let local_identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env)?;
     let transport = daemon_transport(&args, &local_identity)?;
     let control = LocalControlPlane::new(DaemonConfig::new(
         args.network.clone(),
         args.state_path.clone(),
     ));
+    let _control_server = start_control_server(&args, &control, &transport, &local_identity)?;
 
     initialize_state(&args, &control, &local_identity)?;
     control.ensure_identity_bound_state(&local_identity)?;
@@ -160,7 +180,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         match wait_for_next_cycle(&args, &mut trigger_monitor).await {
             Ok(next_trigger) => trigger = next_trigger,
             Err(WaitOutcome::Interrupted) => {
-                println!("quicnetd stopping: received interrupt");
+                println!("quipd stopping: received interrupt");
                 break;
             }
             Err(WaitOutcome::SignalError(error)) => return Err(error.into()),
@@ -374,7 +394,7 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
         if args.reconcile_verbose {
             for entry in &reconcile_report.entries {
                 println!(
-                    "quicnetd reconcile session_id={} peer={} disposition={} path={} reason={}",
+                    "quipd reconcile session_id={} peer={} disposition={} path={} reason={}",
                     hex_session_id(&entry.session_id),
                     entry.peer,
                     reconcile_disposition_label(&entry.disposition),
@@ -399,7 +419,7 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
         .map(|decision| decision.explanation.summary)
         .unwrap_or_else(|| "no routing candidates".to_string());
     println!(
-        "quicnetd active: {} selected_path={} active_session={} preparation={} reprobe={} reconcile={} connect={} trigger={} state_path={}",
+        "quipd active: {} selected_path={} active_session={} preparation={} reprobe={} reconcile={} connect={} trigger={} state_path={}",
         report.state.status_line(),
         selected_path,
         report
@@ -441,6 +461,615 @@ fn daemon_transport(
         fabric::NetworkId::derive(&args.network),
         local_identity.clone(),
     ))
+}
+
+fn normalize_args_paths(args: &mut Args) {
+    args.state_path = expand_home_path(&args.state_path);
+    args.identity_path = expand_home_path(&args.identity_path);
+    args.control_discovery_path = expand_home_path(&args.control_discovery_path);
+    args.network_change_trigger_path = args
+        .network_change_trigger_path
+        .as_deref()
+        .map(expand_home_path);
+    args.authority_snapshot = args.authority_snapshot.as_deref().map(expand_home_path);
+}
+
+fn expand_home_path(path: &str) -> String {
+    if let Some(suffix) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{suffix}");
+        }
+    }
+    path.to_string()
+}
+
+#[derive(Debug)]
+struct ControlServerGuard {
+    discovery_path: PathBuf,
+    _thread: std::thread::JoinHandle<()>,
+}
+
+impl Drop for ControlServerGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.discovery_path);
+    }
+}
+
+fn start_control_server(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+) -> Result<ControlServerGuard, Box<dyn Error>> {
+    let listener = TcpListener::bind(&args.control_bind)?;
+    let local_addr = listener.local_addr()?;
+    let server = Server::from_listener(listener, None)
+        .map_err(|error| std::io::Error::other(format!("control server init failed: {error}")))?;
+    let endpoint = format!("http://{local_addr}/rpc");
+    let discovery_path = PathBuf::from(&args.control_discovery_path);
+    write_control_discovery(
+        &discovery_path,
+        DaemonEndpointDiscovery {
+            endpoint: endpoint.clone(),
+            network: args.network.clone(),
+            state_path: args.state_path.clone(),
+            identity_path: args.identity_path.clone(),
+            pid: std::process::id(),
+            started_at_unix_secs: current_unix_secs(),
+        },
+    )?;
+
+    let server_args = Arc::new(args.clone());
+    let server_control = LocalControlPlane::new(control.config.clone());
+    let server_transport = transport.clone();
+    let server_identity = local_identity.clone();
+    let thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("daemon control runtime should build");
+        for mut request in server.incoming_requests() {
+            let response = route_control_request(
+                &server_args,
+                &server_control,
+                &server_transport,
+                &server_identity,
+                &runtime,
+                &mut request,
+            );
+            if let Err(error) = request.respond(response) {
+                eprintln!("quipd control respond failed: {error}");
+            }
+        }
+    });
+
+    println!(
+        "quipd control ready endpoint={} discovery_path={}",
+        endpoint,
+        discovery_path.display()
+    );
+
+    Ok(ControlServerGuard {
+        discovery_path,
+        _thread: thread,
+    })
+}
+
+fn write_control_discovery(
+    path: &Path,
+    discovery: DaemonEndpointDiscovery,
+) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&discovery)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    )
+}
+
+fn route_control_request(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    runtime: &tokio::runtime::Runtime,
+    request: &mut tiny_http::Request,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    if request.method() != &Method::Post || request.url() != "/rpc" {
+        return json_response(
+            StatusCode(404),
+            ResponseEnvelope::error(
+                "unknown",
+                ErrorCode::NotFound,
+                format!(
+                    "no daemon control route for {} {}",
+                    request.method(),
+                    request.url()
+                ),
+                None,
+            ),
+        );
+    }
+
+    let body = match read_request_body(request) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let envelope = match serde_json::from_slice::<RequestEnvelope>(&body) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return json_response(
+                StatusCode(400),
+                ResponseEnvelope::error(
+                    "unknown",
+                    ErrorCode::InvalidRequest,
+                    format!("invalid daemon control request: {error}"),
+                    None,
+                ),
+            );
+        }
+    };
+
+    let response = match envelope.operation.as_str() {
+        "runtime.status" => {
+            runtime_status_response(args, control, transport, local_identity, envelope)
+        }
+        "runtime.sessions.list" => runtime_sessions_response(control, transport, envelope),
+        "session.connect" => runtime.block_on(session_connect_response(
+            control,
+            transport,
+            local_identity,
+            envelope,
+        )),
+        "session.close" => runtime.block_on(session_close_response(control, transport, envelope)),
+        "session.upgrade" => {
+            runtime.block_on(session_upgrade_response(control, transport, envelope))
+        }
+        "session.reconcile" => {
+            runtime.block_on(session_reconcile_response(control, transport, envelope))
+        }
+        _ => ResponseEnvelope::error(
+            envelope.request_id,
+            ErrorCode::UnsupportedOperation,
+            format!("unsupported daemon operation {}", envelope.operation),
+            None,
+        ),
+    };
+
+    let status = if response.ok {
+        StatusCode(200)
+    } else {
+        map_error_status(&response)
+    };
+    json_response(status, response)
+}
+
+fn read_request_body(
+    request: &mut tiny_http::Request,
+) -> Result<Vec<u8>, Response<std::io::Cursor<Vec<u8>>>> {
+    let Some(limit) = request.body_length() else {
+        return Err(json_response(
+            StatusCode(411),
+            ResponseEnvelope::error(
+                "unknown",
+                ErrorCode::InvalidRequest,
+                "daemon control requests must include Content-Length",
+                None,
+            ),
+        ));
+    };
+    if limit > 64 * 1024 {
+        return Err(json_response(
+            StatusCode(413),
+            ResponseEnvelope::error(
+                "unknown",
+                ErrorCode::InvalidRequest,
+                "daemon control request body exceeds 65536 bytes",
+                None,
+            ),
+        ));
+    }
+    let mut body = vec![0_u8; limit as usize];
+    if let Err(error) = request.as_reader().read_exact(&mut body) {
+        return Err(json_response(
+            StatusCode(400),
+            ResponseEnvelope::error(
+                "unknown",
+                ErrorCode::InvalidRequest,
+                format!("daemon control request body could not be read: {error}"),
+                None,
+            ),
+        ));
+    }
+    Ok(body)
+}
+
+fn runtime_status_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control
+        .ensure_identity_bound_state(local_identity)
+        .and_then(|_| control.sync_runtime_sessions(transport))
+    {
+        Ok(state) => ResponseEnvelope::success(
+            envelope.request_id,
+            RuntimeStatusResult {
+                truth_kind: "runtime".to_string(),
+                daemon_health: "ready".to_string(),
+                identity: IdentityStatus {
+                    status: "loaded".to_string(),
+                    path: args.identity_path.clone(),
+                    node_id: local_identity.peer_id().to_string(),
+                },
+                durable_state: DurableStateStatus {
+                    status: "loaded".to_string(),
+                    path: args.state_path.clone(),
+                    schema_version: state.schema_version,
+                },
+                authority: AuthoritySyncStatus {
+                    sync_status: "in_sync".to_string(),
+                    last_accepted_revision: authority_revision(&state),
+                },
+                runtime_summary: RuntimeSummary {
+                    session_count: state.active_sessions().len(),
+                    active_path_count: state.active_sessions().len(),
+                    reconnect_state: "idle".to_string(),
+                },
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn runtime_sessions_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.sync_runtime_sessions(transport) {
+        Ok(state) => ResponseEnvelope::success(
+            envelope.request_id,
+            RuntimeSessionsListResult {
+                truth_kind: "runtime".to_string(),
+                sessions: state
+                    .active_sessions()
+                    .iter()
+                    .map(runtime_session_entry)
+                    .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+async fn session_connect_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload = match serde_json::from_value::<SessionConnectPayload>(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid session.connect payload: {error}"),
+                None,
+            )
+        }
+    };
+    let state = match control.ensure_identity_bound_state(local_identity) {
+        Ok(state) => state,
+        Err(error) => return daemon_error_response(envelope.request_id, &error),
+    };
+    let peer = match payload.peer_id.parse() {
+        Ok(peer) => peer,
+        Err(_) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                "session.connect peer_id must parse as a peer identifier",
+                None,
+            )
+        }
+    };
+    let protocol = match ProtocolId::new(payload.protocol) {
+        Ok(protocol) => protocol,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                error.to_string(),
+                None,
+            )
+        }
+    };
+    let class = payload
+        .class
+        .as_deref()
+        .map(parse_class)
+        .unwrap_or(TrafficClass::Interactive);
+    match control
+        .realize_best_path(&peer, &protocol, class, transport)
+        .await
+    {
+        Ok(session) => ResponseEnvelope::success(
+            envelope.request_id,
+            SessionConnectResult {
+                truth_kind: "runtime".to_string(),
+                session: SessionConnectSummary {
+                    session_id: hex_session_id(&session.session_id),
+                    state: "active".to_string(),
+                    initial_path_class: path_class_label(session.path_kind).to_string(),
+                },
+            },
+        ),
+        Err(error) => {
+            let _ = state;
+            daemon_error_response(envelope.request_id, &error)
+        }
+    }
+}
+
+async fn session_close_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload = match serde_json::from_value::<SessionClosePayload>(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid session.close payload: {error}"),
+                None,
+            )
+        }
+    };
+    let session_id = match parse_hex_session_id(&payload.session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                error.to_string(),
+                None,
+            )
+        }
+    };
+    match control.close_session(&session_id, transport).await {
+        Ok(()) => ResponseEnvelope::success(
+            envelope.request_id,
+            SessionCloseResult {
+                truth_kind: "runtime".to_string(),
+                closed_session_id: payload.session_id,
+                final_state: "closed".to_string(),
+                closure_reason: payload.reason.or(Some("operator_requested".to_string())),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+async fn session_upgrade_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload = match serde_json::from_value::<SessionUpgradePayload>(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid session.upgrade payload: {error}"),
+                None,
+            )
+        }
+    };
+    let session_id = match parse_hex_session_id(&payload.session_id) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                error.to_string(),
+                None,
+            )
+        }
+    };
+    let prior_state = match control.sync_runtime_sessions(transport) {
+        Ok(state) => state,
+        Err(error) => return daemon_error_response(envelope.request_id, &error),
+    };
+    let prior = match prior_state
+        .active_sessions()
+        .iter()
+        .find(|session| session.session_id == session_id)
+        .cloned()
+    {
+        Some(session) => session,
+        None => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::StaleRuntimeReference,
+                "session id is no longer owned by this daemon run",
+                Some(json!({ "session_id": payload.session_id })),
+            )
+        }
+    };
+    match control.upgrade_session(&session_id, transport).await {
+        Ok(session) => ResponseEnvelope::success(
+            envelope.request_id,
+            SessionUpgradeResult {
+                truth_kind: "runtime".to_string(),
+                session_id: payload.session_id,
+                prior_path_class: path_class_label(prior.path_kind).to_string(),
+                resulting_path_class: path_class_label(session.path_kind).to_string(),
+                state: "active".to_string(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+async fn session_reconcile_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let _payload = match serde_json::from_value::<SessionReconcilePayload>(envelope.payload.clone())
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid session.reconcile payload: {error}"),
+                None,
+            )
+        }
+    };
+    match control.reconcile_sessions(transport).await {
+        Ok(report) => ResponseEnvelope::success(
+            envelope.request_id,
+            SessionReconcileResult {
+                truth_kind: "runtime".to_string(),
+                examined: report.examined,
+                unchanged: report.unchanged,
+                upgraded: report.upgraded,
+                closed: report.closed,
+                entries: report
+                    .entries
+                    .iter()
+                    .map(|entry| ApiSessionReconcileEntry {
+                        session_id: hex_session_id(&entry.session_id),
+                        peer_id: entry.peer.to_string(),
+                        disposition: reconcile_disposition_label(&entry.disposition).to_string(),
+                        reason: entry.reason.clone(),
+                        path_class: entry
+                            .path_kind
+                            .map(path_class_label)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    })
+                    .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn runtime_session_entry(session: &SessionSnapshot) -> RuntimeSessionEntry {
+    RuntimeSessionEntry {
+        session_id: hex_session_id(&session.session_id),
+        peer_id: session.peer.to_string(),
+        state: "active".to_string(),
+        active_path_class: path_class_label(session.path_kind).to_string(),
+        age_seconds: 0,
+        last_activity_seconds: 0,
+    }
+}
+
+fn authority_revision(state: &fabric::DaemonState) -> String {
+    let sequence = state.max_revocation_sequence().unwrap_or(0);
+    format!(
+        "membership:{}:grants:{}:revocations:{}:max_seq:{}",
+        state.membership.subject_peer_id,
+        state.capability_grants.len(),
+        state.revocations.len(),
+        sequence
+    )
+}
+
+fn daemon_error_response(
+    request_id: impl Into<String>,
+    error: &fabric::DaemonStateError,
+) -> ResponseEnvelope {
+    let (code, details) = match error {
+        fabric::DaemonStateError::PeerNotFound(peer) => {
+            (ErrorCode::NotFound, Some(json!({ "peer_id": peer })))
+        }
+        fabric::DaemonStateError::SessionNotFound(session_id) => (
+            ErrorCode::StaleRuntimeReference,
+            Some(json!({ "session_id": session_id })),
+        ),
+        fabric::DaemonStateError::PolicyDenied(_) => (ErrorCode::PolicyRejected, None),
+        fabric::DaemonStateError::NetworkMismatch => (ErrorCode::AuthorityMismatch, None),
+        fabric::DaemonStateError::MissingSchemaVersion
+        | fabric::DaemonStateError::UnsupportedSchemaVersion { .. }
+        | fabric::DaemonStateError::UnsupportedDurableField(_) => {
+            (ErrorCode::StateValidationFailed, None)
+        }
+        _ => (ErrorCode::InternalError, None),
+    };
+    ResponseEnvelope::error(request_id, code, error.to_string(), details)
+}
+
+fn map_error_status(response: &ResponseEnvelope) -> StatusCode {
+    match response.error.as_ref().map(|error| &error.code) {
+        Some(ErrorCode::InvalidRequest) => StatusCode(400),
+        Some(ErrorCode::Unauthorized) => StatusCode(401),
+        Some(ErrorCode::NotFound) => StatusCode(404),
+        Some(ErrorCode::RuntimeUnavailable) => StatusCode(503),
+        Some(ErrorCode::StaleRuntimeReference) => StatusCode(409),
+        Some(ErrorCode::PolicyRejected) => StatusCode(403),
+        Some(ErrorCode::AuthorityMismatch) => StatusCode(409),
+        Some(ErrorCode::StateValidationFailed) => StatusCode(422),
+        Some(ErrorCode::UnsupportedOperation) => StatusCode(404),
+        Some(ErrorCode::InternalError) | None => StatusCode(500),
+    }
+}
+
+fn json_response(
+    status: StatusCode,
+    value: impl serde::Serialize,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = serde_json::to_vec_pretty(&value).expect("daemon JSON serialization should work");
+    let mut response = Response::from_data(body).with_status_code(status);
+    response.add_header(
+        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .expect("daemon response header should be valid"),
+    );
+    response
+}
+
+fn path_class_label(path_kind: fabric::PathKind) -> &'static str {
+    match path_kind {
+        fabric::PathKind::Relay => "relay",
+        _ => "direct",
+    }
+}
+
+fn parse_hex_session_id(value: &str) -> Result<[u8; 16], std::io::Error> {
+    if value.len() != 32 {
+        return Err(std::io::Error::other(
+            "session ids supplied to daemon API must be 32 hex characters",
+        ));
+    }
+    let mut session_id = [0_u8; 16];
+    for (index, slot) in session_id.iter_mut().enumerate() {
+        let offset = index * 2;
+        *slot = u8::from_str_radix(&value[offset..offset + 2], 16).map_err(|_| {
+            std::io::Error::other("session ids supplied to daemon API must be valid hex")
+        })?;
+    }
+    Ok(session_id)
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_secs()
 }
 
 fn prepare_state_for_trigger(
@@ -763,6 +1392,8 @@ mod tests {
             network: "test-network".to_string(),
             state_path: state_path.to_string(),
             identity_path: "./var/test-identity.json".to_string(),
+            control_discovery_path: "./var/control.json".to_string(),
+            control_bind: "127.0.0.1:0".to_string(),
             identity_passphrase_env: "QUICNET_TEST_IDENTITY".to_string(),
             authority_snapshot: None,
             authority_origin: None,

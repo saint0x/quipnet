@@ -8,9 +8,13 @@ rust-version.workspace = true
 [dependencies]
 clap.workspace = true
 crypto = { path = "../../crates/crypto" }
+daemonapi = { path = "../../crates/daemonapi" }
 identity = { path = "../../crates/identity" }
 observability = { path = "../../crates/observability" }
 fabric = { path = "../../crates/fabric" }
 quic = { path = "../../crates/quic" }
 rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny_http = "0.12.0"
 tokio.workspace = true

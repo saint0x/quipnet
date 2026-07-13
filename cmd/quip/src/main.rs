@@ -1,10 +1,16 @@
 use clap::{Parser, Subcommand};
 use crypto::IdentityKeypair;
+use daemonapi::{
+    AuthKind, DaemonEndpointDiscovery, RequestAuth, RequestEnvelope, ResponseEnvelope,
+    RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
+    SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
+    SessionUpgradePayload, SessionUpgradeResult,
+};
 use fabric::PathCandidate;
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
-use quic::QuicTransportAdapter;
 use rand::rngs::OsRng;
+use serde_json::json;
 use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
@@ -19,6 +25,9 @@ struct Cli {
 
     #[arg(long, default_value = "~/.quip/identity/node.json")]
     identity_path: String,
+
+    #[arg(long, default_value = "~/.quip/run/control.json")]
+    control_discovery_path: String,
 
     #[arg(long, default_value = "QUIP_IDENTITY_PASSPHRASE")]
     identity_passphrase_env: String,
@@ -50,6 +59,14 @@ enum Command {
         peer: Option<String>,
     },
     Netcheck,
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
+    },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     Path {
         #[command(subcommand)]
         command: PathCommand,
@@ -104,6 +121,34 @@ enum PathCommand {
         #[arg(long, default_value_t = 1)]
         sample_limit: u32,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum RuntimeCommand {
+    Sessions,
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionCommand {
+    List,
+    Connect {
+        protocol: String,
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value = "interactive")]
+        class: String,
+        #[arg(long, default_value = "direct_preferred")]
+        path_preference: String,
+    },
+    Close {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    Upgrade {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    Reconcile,
 }
 
 #[derive(Subcommand, Debug)]
@@ -162,7 +207,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         cli.network.clone(),
         cli.state_path.clone(),
     ));
-    match cli.command.unwrap_or(Command::Status) {
+    match cli.command.take().unwrap_or(Command::Status) {
         Command::Join { authority_snapshot } => {
             let state = control.seed_from_authority_snapshot(&authority_snapshot)?;
             println!(
@@ -190,8 +235,31 @@ async fn run() -> Result<(), Box<dyn Error>> {
             );
         }
         Command::Status => {
-            let state = control.ensure_state()?;
-            println!("{}", state.status_line());
+            match daemon_request::<RuntimeStatusResult>(&cli, "runtime.status", json!({})) {
+                Ok(status) => {
+                    println!(
+                        "daemon_health={} identity_status={} identity_peer={} durable_state_status={} schema_version={} authority_sync={} authority_revision={} runtime_sessions={} active_paths={} reconnect_state={} truth_kind={}",
+                        status.daemon_health,
+                        status.identity.status,
+                        status.identity.node_id,
+                        status.durable_state.status,
+                        status.durable_state.schema_version,
+                        status.authority.sync_status,
+                        status.authority.last_accepted_revision,
+                        status.runtime_summary.session_count,
+                        status.runtime_summary.active_path_count,
+                        status.runtime_summary.reconnect_state,
+                        status.truth_kind
+                    );
+                }
+                Err(_) => {
+                    let state = control.ensure_state()?;
+                    println!(
+                        "{} daemon_health=unavailable truth_kind=durable",
+                        state.status_line()
+                    );
+                }
+            }
         }
         Command::Peers => {
             let state = control.ensure_state()?;
@@ -247,6 +315,151 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 println!("warning: {}", warning);
             }
         }
+        Command::Runtime { command } => match command {
+            RuntimeCommand::Sessions => {
+                let sessions = daemon_request::<RuntimeSessionsListResult>(
+                    &cli,
+                    "runtime.sessions.list",
+                    json!({}),
+                )?;
+                if sessions.sessions.is_empty() {
+                    println!("truth_kind={} sessions=0", sessions.truth_kind);
+                } else {
+                    for session in sessions.sessions {
+                        println!(
+                            "session_id={} peer={} state={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
+                            session.session_id,
+                            session.peer_id,
+                            session.state,
+                            session.active_path_class,
+                            session.age_seconds,
+                            session.last_activity_seconds,
+                            sessions.truth_kind
+                        );
+                    }
+                }
+            }
+        },
+        Command::Session { command } => match command {
+            SessionCommand::List => {
+                let sessions = daemon_request::<RuntimeSessionsListResult>(
+                    &cli,
+                    "runtime.sessions.list",
+                    json!({}),
+                )?;
+                if sessions.sessions.is_empty() {
+                    println!("truth_kind={} sessions=0", sessions.truth_kind);
+                } else {
+                    for session in sessions.sessions {
+                        println!(
+                            "session_id={} peer={} state={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
+                            session.session_id,
+                            session.peer_id,
+                            session.state,
+                            session.active_path_class,
+                            session.age_seconds,
+                            session.last_activity_seconds,
+                            sessions.truth_kind
+                        );
+                    }
+                }
+            }
+            SessionCommand::Connect {
+                protocol,
+                peer,
+                class,
+                path_preference,
+            } => {
+                let state = control.ensure_state()?;
+                let target = resolve_peer(peer.as_deref(), &state)?;
+                let result = daemon_request::<SessionConnectResult>(
+                    &cli,
+                    "session.connect",
+                    serde_json::to_value(SessionConnectPayload {
+                        peer_id: target.to_string(),
+                        protocol,
+                        class: Some(class),
+                        path_preference: Some(path_preference),
+                    })?,
+                )?;
+                println!(
+                    "session_id={} state={} path={} truth_kind={}",
+                    result.session.session_id,
+                    result.session.state,
+                    result.session.initial_path_class,
+                    result.truth_kind
+                );
+            }
+            SessionCommand::Close { session } => {
+                let sessions = daemon_request::<RuntimeSessionsListResult>(
+                    &cli,
+                    "runtime.sessions.list",
+                    json!({}),
+                )?;
+                let session_id = resolve_daemon_session_id(session.as_deref(), &sessions.sessions)?;
+                let result = daemon_request::<SessionCloseResult>(
+                    &cli,
+                    "session.close",
+                    serde_json::to_value(SessionClosePayload {
+                        session_id,
+                        reason: Some("operator_requested".to_string()),
+                    })?,
+                )?;
+                println!(
+                    "session_id={} final_state={} closure_reason={} truth_kind={}",
+                    result.closed_session_id,
+                    result.final_state,
+                    result.closure_reason.as_deref().unwrap_or("none"),
+                    result.truth_kind
+                );
+            }
+            SessionCommand::Upgrade { session } => {
+                let sessions = daemon_request::<RuntimeSessionsListResult>(
+                    &cli,
+                    "runtime.sessions.list",
+                    json!({}),
+                )?;
+                let session_id = resolve_daemon_session_id(session.as_deref(), &sessions.sessions)?;
+                let result = daemon_request::<SessionUpgradeResult>(
+                    &cli,
+                    "session.upgrade",
+                    serde_json::to_value(SessionUpgradePayload { session_id })?,
+                )?;
+                println!(
+                    "session_id={} prior_path={} resulting_path={} state={} truth_kind={}",
+                    result.session_id,
+                    result.prior_path_class,
+                    result.resulting_path_class,
+                    result.state,
+                    result.truth_kind
+                );
+            }
+            SessionCommand::Reconcile => {
+                let result = daemon_request::<SessionReconcileResult>(
+                    &cli,
+                    "session.reconcile",
+                    serde_json::to_value(SessionReconcilePayload::default())?,
+                )?;
+                println!(
+                    "examined={} unchanged={} upgraded={} closed={} truth_kind={}",
+                    result.examined,
+                    result.unchanged,
+                    result.upgraded,
+                    result.closed,
+                    result.truth_kind
+                );
+                for entry in result.entries {
+                    println!(
+                        "session_id={} peer={} disposition={} path={} reason={}",
+                        entry.session_id,
+                        entry.peer_id,
+                        entry.disposition,
+                        entry.path_class,
+                        entry.reason
+                    );
+                }
+            }
+        },
         Command::Path { command } => match command {
             PathCommand::Show { peer, class } => {
                 let state = control.ensure_state()?;
@@ -293,73 +506,117 @@ async fn run() -> Result<(), Box<dyn Error>> {
             peer,
             class,
         } => {
-            let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
-            let state = control.ensure_identity_bound_state(&identity)?;
+            let state = control.ensure_state()?;
             let target = resolve_peer(peer.as_deref(), &state)?;
-            let protocol =
-                ProtocolId::new(protocol).map_err(|error| usage_error(error.to_string()))?;
-            let class = parse_class(&class);
-            let transport = QuicTransportAdapter::with_identity(
-                fabric::NetworkId::derive(&cli.network),
-                identity,
-            );
-            let session = control
-                .realize_best_path(&target, &protocol, class, &transport)
-                .await?;
+            let result = daemon_request::<SessionConnectResult>(
+                &cli,
+                "session.connect",
+                serde_json::to_value(SessionConnectPayload {
+                    peer_id: target.to_string(),
+                    protocol,
+                    class: Some(class),
+                    path_preference: Some("direct_preferred".to_string()),
+                })?,
+            )?;
             println!(
-                "session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={}",
-                hex_session_id(&session.session_id),
-                session
-                    .relay_attempt_id
-                    .as_ref()
-                    .map(hex_session_id)
-                    .unwrap_or_else(|| "none".to_string()),
-                session.peer,
-                session
-                    .protocol
-                    .as_ref()
-                    .map(ProtocolId::as_str)
-                    .unwrap_or("none"),
-                class_label(session.class),
-                session.path_kind,
-                session
-                    .relay_peer
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "direct".to_string()),
-                session.remote_endpoint,
-                session.relay_endpoint.unwrap_or_else(|| "none".to_string())
+                "session_id={} state={} path={} truth_kind={}",
+                result.session.session_id,
+                result.session.state,
+                result.session.initial_path_class,
+                result.truth_kind
             );
         }
         Command::SessionStatus => {
-            return Err(runtime_session_cli_error(
-                "session-status requires a daemon-owned runtime session registry and cannot run from a standalone quip process",
-            )
-            .into());
+            let sessions = daemon_request::<RuntimeSessionsListResult>(
+                &cli,
+                "runtime.sessions.list",
+                json!({}),
+            )?;
+            if sessions.sessions.is_empty() {
+                println!("truth_kind={} sessions=0", sessions.truth_kind);
+            } else {
+                for session in sessions.sessions {
+                    println!(
+                        "session_id={} peer={} state={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
+                        session.session_id,
+                        session.peer_id,
+                        session.state,
+                        session.active_path_class,
+                        session.age_seconds,
+                        session.last_activity_seconds,
+                        sessions.truth_kind
+                    );
+                }
+            }
         }
         Command::SessionClose { session } => {
-            let sessions = control.session_snapshots()?;
-            let session_id = resolve_session_id(session.as_deref(), &sessions)?;
-            return Err(runtime_session_cli_error(format!(
-                "session-close requires a daemon-owned runtime session registry; cached session {} cannot be closed from a standalone quip process",
-                hex_session_id(&session_id)
-            ))
-            .into());
+            let sessions = daemon_request::<RuntimeSessionsListResult>(
+                &cli,
+                "runtime.sessions.list",
+                json!({}),
+            )?;
+            let session_id = resolve_daemon_session_id(session.as_deref(), &sessions.sessions)?;
+            let result = daemon_request::<SessionCloseResult>(
+                &cli,
+                "session.close",
+                serde_json::to_value(SessionClosePayload {
+                    session_id,
+                    reason: Some("operator_requested".to_string()),
+                })?,
+            )?;
+            println!(
+                "session_id={} final_state={} closure_reason={} truth_kind={}",
+                result.closed_session_id,
+                result.final_state,
+                result.closure_reason.as_deref().unwrap_or("none"),
+                result.truth_kind
+            );
         }
         Command::SessionUpgrade { session } => {
-            let sessions = control.session_snapshots()?;
-            let session_id = resolve_session_id(session.as_deref(), &sessions)?;
-            return Err(runtime_session_cli_error(format!(
-                "session-upgrade requires a daemon-owned runtime session registry; cached session {} cannot be upgraded from a standalone quip process",
-                hex_session_id(&session_id)
-            ))
-            .into());
+            let sessions = daemon_request::<RuntimeSessionsListResult>(
+                &cli,
+                "runtime.sessions.list",
+                json!({}),
+            )?;
+            let session_id = resolve_daemon_session_id(session.as_deref(), &sessions.sessions)?;
+            let result = daemon_request::<SessionUpgradeResult>(
+                &cli,
+                "session.upgrade",
+                serde_json::to_value(SessionUpgradePayload { session_id })?,
+            )?;
+            println!(
+                "session_id={} prior_path={} resulting_path={} state={} truth_kind={}",
+                result.session_id,
+                result.prior_path_class,
+                result.resulting_path_class,
+                result.state,
+                result.truth_kind
+            );
         }
         Command::SessionReconcile => {
-            return Err(runtime_session_cli_error(
-                "session-reconcile requires a daemon-owned runtime session registry and cannot run from a standalone quip process",
-            )
-            .into());
+            let result = daemon_request::<SessionReconcileResult>(
+                &cli,
+                "session.reconcile",
+                serde_json::to_value(SessionReconcilePayload::default())?,
+            )?;
+            println!(
+                "examined={} unchanged={} upgraded={} closed={} truth_kind={}",
+                result.examined,
+                result.unchanged,
+                result.upgraded,
+                result.closed,
+                result.truth_kind
+            );
+            for entry in result.entries {
+                println!(
+                    "session_id={} peer={} disposition={} path={} reason={}",
+                    entry.session_id,
+                    entry.peer_id,
+                    entry.disposition,
+                    entry.path_class,
+                    entry.reason
+                );
+            }
         }
         Command::State { command } => match command {
             StateCommand::Validate => {
@@ -700,10 +957,6 @@ fn render_revocation_target(target: &membership::RevocationTarget) -> String {
     }
 }
 
-fn hex_session_id(session_id: &[u8; 16]) -> String {
-    hex_bytes(session_id)
-}
-
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -711,20 +964,26 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .collect::<String>()
 }
 
-fn resolve_session_id(
+fn resolve_daemon_session_id(
     session: Option<&str>,
-    sessions: &[fabric::SessionSnapshot],
-) -> Result<[u8; 16], std::io::Error> {
+    sessions: &[daemonapi::RuntimeSessionEntry],
+) -> Result<String, std::io::Error> {
     if let Some(session) = session {
-        parse_hex_session_id(session)
+        if session.len() != 32 {
+            return Err(usage_error(
+                "session ids supplied to CLI must be 32 hex characters",
+            ));
+        }
+        Ok(session.to_string())
     } else {
         sessions
             .first()
-            .map(|entry| entry.session_id)
+            .map(|entry| entry.session_id.clone())
             .ok_or_else(|| usage_error("a session id is required or an active session must exist"))
     }
 }
 
+#[cfg(test)]
 fn parse_hex_session_id(value: &str) -> Result<[u8; 16], std::io::Error> {
     if value.len() != 32 {
         return Err(usage_error(
@@ -782,6 +1041,7 @@ fn usage_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 
+#[cfg(test)]
 fn runtime_session_cli_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
@@ -789,6 +1049,7 @@ fn runtime_session_cli_error(message: impl Into<String>) -> std::io::Error {
 fn normalize_cli_paths(cli: &mut Cli) {
     cli.state_path = expand_home_path(&cli.state_path);
     cli.identity_path = expand_home_path(&cli.identity_path);
+    cli.control_discovery_path = expand_home_path(&cli.control_discovery_path);
 }
 
 fn expand_home_path(path: &str) -> String {
@@ -798,6 +1059,55 @@ fn expand_home_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+fn daemon_request<T>(
+    cli: &Cli,
+    operation: &str,
+    payload: serde_json::Value,
+) -> Result<T, Box<dyn Error>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let discovery = load_daemon_discovery(&cli.control_discovery_path)?;
+    let request = RequestEnvelope {
+        request_id: format!("req-{}", std::process::id()),
+        operation: operation.to_string(),
+        auth: RequestAuth {
+            kind: AuthKind::LocalProcess,
+        },
+        payload,
+    };
+    let response = match ureq::post(&discovery.endpoint)
+        .set("Content-Type", "application/json")
+        .send_json(serde_json::to_value(&request)?)
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => {
+            let envelope: ResponseEnvelope = response.into_json()?;
+            let error = envelope
+                .error
+                .map(|error| format!("{:?}: {}", error.code, error.message))
+                .unwrap_or_else(|| "daemon request failed".to_string());
+            return Err(usage_error(error).into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let envelope: ResponseEnvelope = response.into_json()?;
+    if !envelope.ok {
+        let error = envelope
+            .error
+            .map(|error| format!("{:?}: {}", error.code, error.message))
+            .unwrap_or_else(|| "daemon request failed".to_string());
+        return Err(usage_error(error).into());
+    }
+    Ok(serde_json::from_value(envelope.result.ok_or_else(
+        || usage_error("daemon response did not include a result"),
+    )?)?)
+}
+
+fn load_daemon_discovery(path: &str) -> Result<DaemonEndpointDiscovery, Box<dyn Error>> {
+    Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
 fn hex_public_key(identity: &IdentityKeypair) -> String {

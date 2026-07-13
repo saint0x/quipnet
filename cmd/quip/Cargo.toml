@@ -8,10 +8,14 @@ rust-version.workspace = true
 [dependencies]
 clap.workspace = true
 crypto = { path = "../../crates/crypto" }
+daemonapi = { path = "../../crates/daemonapi" }
 identity = { path = "../../crates/identity" }
 observability = { path = "../../crates/observability" }
 fabric = { path = "../../crates/fabric" }
 membership = { path = "../../crates/membership" }
 quic = { path = "../../crates/quic" }
 rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
+ureq = { version = "2.10.1", features = ["json"] }
