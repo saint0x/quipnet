@@ -1,0 +1,48 @@
+{
+  "ok": true,
+  "request_id": "req-runtime-paths-1",
+  "result": {
+    "truth_kind": "runtime",
+    "paths": [
+      {
+        "session_id": "9f10f8e8f34137b1eecce5e7ab9e843a",
+        "peer_id": "ed25519:active-peer",
+        "protocol": "/quicnet/control/1",
+        "class": "control",
+        "state": "active",
+        "path_class": "relay",
+        "source": "authority_relay",
+        "relay_peer_id": "ed25519:relay-peer",
+        "endpoint_summary": "relay=quic://203.0.113.70:443 destination=203.0.113.71:8443",
+        "score": 42,
+        "state_reason": "selected path still matches active session",
+        "summary": "Relay routing for ed25519:active-peer via ed25519:relay-peer from AuthorityRelay scores 42 for Control traffic",
+        "alternatives": [
+          {
+            "path_class": "direct",
+            "source": "observed",
+            "relay_peer_id": null,
+            "score": 55,
+            "summary": "DirectIpv6 routing for ed25519:active-peer via direct from Observed scores 55 for Control traffic"
+          }
+        ]
+      },
+      {
+        "session_id": null,
+        "peer_id": "ed25519:suppressed-peer",
+        "protocol": "/quicnet/control/1",
+        "class": "interactive",
+        "state": "suppressed",
+        "path_class": "relay",
+        "source": "authority_relay",
+        "relay_peer_id": "ed25519:relay-peer",
+        "endpoint_summary": "relay=ed25519:relay-peer",
+        "score": 61,
+        "state_reason": "no active capability grants for /quicnet/control/1",
+        "summary": "reconnect suppressed for ed25519:suppressed-peer: Relay routing for ed25519:suppressed-peer via ed25519:relay-peer from AuthorityRelay scores 61 for Interactive traffic",
+        "alternatives": []
+      }
+    ]
+  },
+  "error": null
+}

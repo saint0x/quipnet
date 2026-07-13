@@ -174,6 +174,42 @@ pub struct AuthorityReevaluationReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimePathState {
+    Active,
+    Degraded,
+    Migrating,
+    Failed,
+    Suppressed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePathAlternative {
+    pub path_kind: PathKind,
+    pub source: PathSource,
+    pub relay_peer: Option<PeerId>,
+    pub score: u32,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePathSnapshot {
+    pub session_id: Option<[u8; 16]>,
+    pub peer: PeerId,
+    pub protocol: Option<ProtocolId>,
+    pub class: TrafficClass,
+    pub state: RuntimePathState,
+    pub path_kind: Option<PathKind>,
+    pub source: Option<PathSource>,
+    pub relay_peer: Option<PeerId>,
+    pub endpoint_summary: String,
+    pub state_reason: Option<String>,
+    pub score: Option<u32>,
+    pub summary: String,
+    pub alternatives: Vec<RuntimePathAlternative>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DurableStateValidationReport {
     pub schema_version: u64,
     pub state_path: PathBuf,
@@ -1303,6 +1339,105 @@ impl LocalControlPlane {
         transport.recent_events(limit).map_err(Into::into)
     }
 
+    pub fn runtime_paths<T>(
+        &self,
+        transport: &T,
+    ) -> Result<Vec<RuntimePathSnapshot>, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let state = self.ensure_state()?;
+        let mut snapshots = Vec::new();
+        let sessions = transport.active_sessions()?;
+        let suppressions = transport.reconnect_suppressions()?;
+
+        for session in sessions {
+            let candidates = state.path_candidates_for(&session.peer);
+            let selected = candidates
+                .iter()
+                .find(|candidate| runtime_candidate_matches_session(candidate, &session));
+            let alternatives = runtime_path_alternatives(&candidates, session.class, selected);
+            let explanation = selected.map(|candidate| candidate.explain(session.class));
+            snapshots.push(RuntimePathSnapshot {
+                session_id: Some(session.session_id),
+                peer: session.peer.clone(),
+                protocol: session.protocol.clone(),
+                class: session.class,
+                state: runtime_path_state_from_session(&session.state),
+                path_kind: Some(session.path_kind),
+                source: selected
+                    .map(|candidate| candidate.source.clone())
+                    .or_else(|| route_source_to_path_source(&session.source)),
+                relay_peer: session.relay_peer.clone(),
+                endpoint_summary: runtime_session_endpoint_summary(&session),
+                state_reason: session.state_reason.clone(),
+                score: selected.map(|candidate| candidate.score(session.class)),
+                summary: explanation
+                    .map(|explanation| explanation.summary)
+                    .unwrap_or_else(|| runtime_session_summary(&session)),
+                alternatives,
+            });
+        }
+
+        for suppression in suppressions {
+            if snapshots.iter().any(|entry| {
+                entry.session_id.is_some()
+                    && entry.peer == suppression.peer
+                    && entry.protocol == suppression.protocol
+                    && entry.class == suppression.class
+            }) {
+                continue;
+            }
+            let candidates = state.path_candidates_for(&suppression.peer);
+            let selected = select_best_path(&candidates, suppression.class);
+            let suppressed_summary = selected
+                .as_ref()
+                .map(|decision| {
+                    format!(
+                        "reconnect suppressed for {}: {}",
+                        suppression.peer, decision.explanation.summary
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "reconnect suppressed for {} because {}",
+                        suppression.peer, suppression.reason
+                    )
+                });
+            let selected_candidate = selected.as_ref().map(|decision| &decision.selected);
+            snapshots.push(RuntimePathSnapshot {
+                session_id: None,
+                peer: suppression.peer.clone(),
+                protocol: suppression.protocol.clone(),
+                class: suppression.class,
+                state: RuntimePathState::Suppressed,
+                path_kind: selected_candidate.map(|candidate| candidate.path_kind),
+                source: selected_candidate.map(|candidate| candidate.source.clone()),
+                relay_peer: selected_candidate.and_then(|candidate| candidate.relay_peer.clone()),
+                endpoint_summary: selected_candidate
+                    .map(runtime_candidate_endpoint_summary)
+                    .unwrap_or_else(|| "no active runtime path".to_string()),
+                state_reason: Some(suppression.reason.clone()),
+                score: selected_candidate.map(|candidate| candidate.score(suppression.class)),
+                summary: suppressed_summary,
+                alternatives: runtime_path_alternatives(
+                    &candidates,
+                    suppression.class,
+                    selected_candidate,
+                ),
+            });
+        }
+
+        snapshots.sort_by(|left, right| {
+            left.peer
+                .to_string()
+                .cmp(&right.peer.to_string())
+                .then(runtime_class_rank(left.class).cmp(&runtime_class_rank(right.class)))
+                .then(left.session_id.cmp(&right.session_id))
+        });
+        Ok(snapshots)
+    }
+
     pub async fn reevaluate_runtime_authority<T>(
         &self,
         transport: &T,
@@ -1588,6 +1723,106 @@ fn merged_path_candidates(state: &DaemonState) -> Vec<PathCandidate> {
     }
 
     candidates
+}
+
+fn runtime_path_state_from_session(state: &RuntimeSessionState) -> RuntimePathState {
+    match state {
+        RuntimeSessionState::Degraded => RuntimePathState::Degraded,
+        RuntimeSessionState::Migrating => RuntimePathState::Migrating,
+        RuntimeSessionState::Failed
+        | RuntimeSessionState::Closing
+        | RuntimeSessionState::Closed => RuntimePathState::Failed,
+        _ => RuntimePathState::Active,
+    }
+}
+
+fn runtime_candidate_matches_session(candidate: &PathCandidate, session: &SessionSnapshot) -> bool {
+    candidate.peer == session.peer
+        && candidate.path_kind == session.path_kind
+        && candidate.relay_peer == session.relay_peer
+        && candidate.supports_class(session.class)
+}
+
+fn runtime_path_alternatives(
+    candidates: &[PathCandidate],
+    class: TrafficClass,
+    selected: Option<&PathCandidate>,
+) -> Vec<RuntimePathAlternative> {
+    let mut alternatives = candidates
+        .iter()
+        .filter(|candidate| candidate.supports_class(class))
+        .filter(|candidate| Some(*candidate) != selected)
+        .cloned()
+        .collect::<Vec<_>>();
+    alternatives.sort_by_key(|candidate| candidate.score(class));
+    alternatives
+        .into_iter()
+        .map(|candidate| RuntimePathAlternative {
+            path_kind: candidate.path_kind,
+            source: candidate.source.clone(),
+            relay_peer: candidate.relay_peer.clone(),
+            score: candidate.score(class),
+            summary: candidate.explain(class).summary,
+        })
+        .collect()
+}
+
+fn route_source_to_path_source(source: &RouteSource) -> Option<PathSource> {
+    Some(match source {
+        RouteSource::Observed => PathSource::Observed,
+        RouteSource::Bootstrap => PathSource::Bootstrap,
+        RouteSource::AuthorityRelay => PathSource::AuthorityRelay,
+    })
+}
+
+fn runtime_session_endpoint_summary(session: &SessionSnapshot) -> String {
+    if session.path_kind == PathKind::Relay {
+        format!(
+            "relay={} destination={}",
+            session
+                .relay_endpoint
+                .as_deref()
+                .unwrap_or("unknown-relay-endpoint"),
+            session.remote_endpoint
+        )
+    } else {
+        session.remote_endpoint.clone()
+    }
+}
+
+fn runtime_candidate_endpoint_summary(candidate: &PathCandidate) -> String {
+    match candidate.path_kind {
+        PathKind::Relay => format!(
+            "relay={}",
+            candidate
+                .relay_peer
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unknown-relay".to_string())
+        ),
+        _ => "direct".to_string(),
+    }
+}
+
+fn runtime_session_summary(session: &SessionSnapshot) -> String {
+    format!(
+        "{} runtime path for {} is {}",
+        match session.path_kind {
+            PathKind::Relay => "relay",
+            _ => "direct",
+        },
+        session.peer,
+        runtime_session_endpoint_summary(session)
+    )
+}
+
+fn runtime_class_rank(class: TrafficClass) -> u8 {
+    match class {
+        TrafficClass::Control => 0,
+        TrafficClass::Interactive => 1,
+        TrafficClass::Bulk => 2,
+        TrafficClass::Background => 3,
+    }
 }
 
 fn push_unique_candidate(candidates: &mut Vec<PathCandidate>, candidate: PathCandidate) {
@@ -3187,6 +3422,56 @@ mod tests {
             .await
             .expect_err("suppressed reconnect should deny reestablishment");
         assert!(denied.to_string().contains("policy denied"));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn runtime_paths_reports_active_and_suppressed_runtime_truth() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-runtime-paths-state");
+        let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
+            "runtime-paths-prod",
+            &state_path,
+            95,
+            96,
+            b"runtime-paths-runtime",
+            b"runtime-paths-target",
+        )
+        .await;
+
+        let active_paths = control
+            .runtime_paths(&transport)
+            .expect("runtime paths should render");
+        assert_eq!(active_paths.len(), 1);
+        assert_eq!(active_paths[0].session_id, Some(session.session_id));
+        assert_eq!(active_paths[0].state, RuntimePathState::Active);
+        assert_eq!(active_paths[0].path_kind, Some(PathKind::Relay));
+        assert!(!active_paths[0].summary.is_empty());
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.capability_grants.clear();
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+        control
+            .reevaluate_runtime_authority(&transport)
+            .await
+            .expect("authority reevaluation should succeed");
+
+        let suppressed_paths = control
+            .runtime_paths(&transport)
+            .expect("suppressed runtime paths should render");
+        assert_eq!(suppressed_paths.len(), 1);
+        assert_eq!(suppressed_paths[0].session_id, None);
+        assert_eq!(suppressed_paths[0].state, RuntimePathState::Suppressed);
+        assert_eq!(suppressed_paths[0].protocol, session.protocol);
+        assert!(suppressed_paths[0]
+            .state_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no active capability grants"));
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();

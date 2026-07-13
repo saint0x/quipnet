@@ -2,11 +2,11 @@ use clap::{Parser, Subcommand};
 use crypto::IdentityKeypair;
 use daemonapi::{
     AuthKind, DaemonEndpointDiscovery, RequestAuth, RequestEnvelope, ResponseEnvelope,
-    RuntimeEventsListResult, RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload,
-    SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionReconcilePayload,
-    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
+    RuntimeEventsListResult, RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
+    RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
+    SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
+    SessionUpgradePayload, SessionUpgradeResult,
 };
-use fabric::PathCandidate;
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
 use rand::rngs::OsRng;
@@ -126,6 +126,7 @@ enum PathCommand {
 #[derive(Subcommand, Debug)]
 enum RuntimeCommand {
     Sessions,
+    Paths,
     Events {
         #[arg(long, default_value_t = 32)]
         limit: usize,
@@ -345,6 +346,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
             }
+            RuntimeCommand::Paths => {
+                let paths = daemon_request::<RuntimePathsListResult>(
+                    &cli,
+                    "runtime.paths.list",
+                    json!({}),
+                )?;
+                emit_runtime_paths(&paths);
+            }
             RuntimeCommand::Events { limit } => {
                 let events = daemon_request::<RuntimeEventsListResult>(
                     &cli,
@@ -494,14 +503,14 @@ async fn run() -> Result<(), Box<dyn Error>> {
         },
         Command::Path { command } => match command {
             PathCommand::Show { peer, class } => {
-                let state = control.ensure_state()?;
-                let class = parse_class(&class);
-                let peer = resolve_peer(peer.as_deref(), &state)?;
-                if let Some(snapshot) = render_path_snapshot(&state, &peer, class) {
-                    println!("{}", snapshot);
-                } else {
-                    println!("no routing candidates available");
-                }
+                let paths = daemon_request::<RuntimePathsListResult>(
+                    &cli,
+                    "runtime.paths.list",
+                    json!({}),
+                )?;
+                let filtered =
+                    filter_runtime_paths(&paths.paths, peer.as_deref(), Some(parse_class(&class)));
+                emit_filtered_runtime_paths(&paths.truth_kind, &filtered);
             }
             PathCommand::Watch {
                 peer,
@@ -513,16 +522,18 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 let interval = Duration::from_millis(interval_ms.max(1));
                 let mut previous = None;
                 for index in 0..sample_limit.max(1) {
-                    let state = control.ensure_state()?;
-                    let target = resolve_peer(peer.as_deref(), &state)?;
-                    let snapshot =
-                        render_path_snapshot(&state, &target, class).unwrap_or_else(|| {
-                            format!(
-                                "peer={} class={} no routing candidates available",
-                                target,
-                                class_label(class)
-                            )
-                        });
+                    let paths = daemon_request::<RuntimePathsListResult>(
+                        &cli,
+                        "runtime.paths.list",
+                        json!({}),
+                    )?;
+                    let filtered = filter_runtime_paths(&paths.paths, peer.as_deref(), Some(class));
+                    let snapshot = render_runtime_path_watch_snapshot(
+                        &paths.truth_kind,
+                        &filtered,
+                        peer.as_deref(),
+                        class,
+                    );
                     if previous.as_ref() != Some(&snapshot) {
                         println!("sample={} {}", index + 1, snapshot);
                         previous = Some(snapshot);
@@ -866,6 +877,102 @@ fn resolve_peer(peer: Option<&str>, state: &fabric::DaemonState) -> Result<PeerI
         })
 }
 
+fn emit_runtime_paths(paths: &RuntimePathsListResult) {
+    emit_filtered_runtime_paths(&paths.truth_kind, &paths.paths);
+}
+
+fn emit_filtered_runtime_paths(truth_kind: &str, paths: &[RuntimePathEntry]) {
+    if paths.is_empty() {
+        println!("truth_kind={} paths=0", truth_kind);
+    } else {
+        for path in paths {
+            println!("{}", render_runtime_path_line(path, truth_kind));
+        }
+    }
+}
+
+fn filter_runtime_paths(
+    paths: &[RuntimePathEntry],
+    peer: Option<&str>,
+    class: Option<TrafficClass>,
+) -> Vec<RuntimePathEntry> {
+    paths
+        .iter()
+        .filter(|path| peer.map(|value| path.peer_id == value).unwrap_or(true))
+        .filter(|path| {
+            class
+                .map(|value| path.class == class_label(value))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn render_runtime_path_watch_snapshot(
+    truth_kind: &str,
+    paths: &[RuntimePathEntry],
+    peer: Option<&str>,
+    class: TrafficClass,
+) -> String {
+    if paths.is_empty() {
+        format!(
+            "peer={} class={} truth_kind={} paths=0",
+            peer.unwrap_or("all"),
+            class_label(class),
+            truth_kind
+        )
+    } else {
+        paths
+            .iter()
+            .map(|path| render_runtime_path_line(path, truth_kind))
+            .collect::<Vec<_>>()
+            .join(" || ")
+    }
+}
+
+fn render_runtime_path_line(path: &RuntimePathEntry, truth_kind: &str) -> String {
+    format!(
+        "session_id={} peer={} protocol={} class={} state={} path={} source={} relay_peer={} endpoint={} score={} state_reason={} summary=\"{}\" alternatives=[{}] truth_kind={}",
+        path.session_id.as_deref().unwrap_or("none"),
+        path.peer_id,
+        path.protocol.as_deref().unwrap_or("none"),
+        path.class,
+        path.state,
+        path.path_class,
+        path.source,
+        path.relay_peer_id.as_deref().unwrap_or("none"),
+        path.endpoint_summary,
+        path.score
+            .map(|score| score.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        path.state_reason.as_deref().unwrap_or("none"),
+        path.summary,
+        render_runtime_path_alternatives(&path.alternatives),
+        truth_kind
+    )
+}
+
+fn render_runtime_path_alternatives(alternatives: &[RuntimePathAlternativeEntry]) -> String {
+    if alternatives.is_empty() {
+        "none".to_string()
+    } else {
+        alternatives
+            .iter()
+            .map(|alternative| {
+                format!(
+                    "{}/score={}/source={}/relay={}",
+                    alternative.path_class,
+                    alternative.score,
+                    alternative.source,
+                    alternative.relay_peer_id.as_deref().unwrap_or("direct")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+#[cfg(test)]
 fn render_path_snapshot(
     state: &fabric::DaemonState,
     peer: &PeerId,
@@ -893,11 +1000,12 @@ fn render_path_snapshot(
     ))
 }
 
+#[cfg(test)]
 fn render_path_alternatives(
     state: &fabric::DaemonState,
     peer: &PeerId,
     class: TrafficClass,
-    selected: &PathCandidate,
+    selected: &fabric::PathCandidate,
 ) -> Vec<String> {
     let mut candidates = state
         .path_candidates_for(peer)
@@ -1200,6 +1308,82 @@ mod tests {
 
         assert_eq!(alternatives.len(), 1);
         assert!(alternatives[0].starts_with("Relay/score="));
+    }
+
+    #[test]
+    fn render_runtime_path_line_includes_runtime_truth_and_alternatives() {
+        let line = render_runtime_path_line(
+            &RuntimePathEntry {
+                session_id: Some("abcd".to_string()),
+                peer_id: "ed25519:test-peer".to_string(),
+                protocol: Some("/quicnet/control/1".to_string()),
+                class: "control".to_string(),
+                state: "active".to_string(),
+                path_class: "relay".to_string(),
+                source: "authority_relay".to_string(),
+                relay_peer_id: Some("ed25519:test-relay".to_string()),
+                endpoint_summary: "relay=quic://203.0.113.70:443 destination=203.0.113.71:8443"
+                    .to_string(),
+                score: Some(42),
+                state_reason: Some("selected by daemon".to_string()),
+                summary: "relay path chosen for continuity".to_string(),
+                alternatives: vec![RuntimePathAlternativeEntry {
+                    path_class: "direct".to_string(),
+                    source: "observed".to_string(),
+                    relay_peer_id: None,
+                    score: 55,
+                    summary: "direct candidate available".to_string(),
+                }],
+            },
+            "runtime",
+        );
+
+        assert!(line.contains("truth_kind=runtime"));
+        assert!(line.contains("path=relay"));
+        assert!(line.contains("alternatives=[direct/score=55/source=observed/relay=direct]"));
+    }
+
+    #[test]
+    fn filter_runtime_paths_limits_by_peer_and_class() {
+        let paths = vec![
+            RuntimePathEntry {
+                session_id: Some("sess-1".to_string()),
+                peer_id: "peer-a".to_string(),
+                protocol: Some("/quicnet/control/1".to_string()),
+                class: "control".to_string(),
+                state: "active".to_string(),
+                path_class: "direct".to_string(),
+                source: "observed".to_string(),
+                relay_peer_id: None,
+                endpoint_summary: "203.0.113.10:443".to_string(),
+                score: Some(10),
+                state_reason: None,
+                summary: "direct path".to_string(),
+                alternatives: Vec::new(),
+            },
+            RuntimePathEntry {
+                session_id: None,
+                peer_id: "peer-b".to_string(),
+                protocol: Some("/quicnet/control/1".to_string()),
+                class: "interactive".to_string(),
+                state: "suppressed".to_string(),
+                path_class: "relay".to_string(),
+                source: "authority_relay".to_string(),
+                relay_peer_id: Some("relay-b".to_string()),
+                endpoint_summary: "relay=relay-b".to_string(),
+                score: Some(20),
+                state_reason: Some("policy denied".to_string()),
+                summary: "suppressed".to_string(),
+                alternatives: Vec::new(),
+            },
+        ];
+
+        let filtered =
+            filter_runtime_paths(&paths, Some("peer-b"), Some(TrafficClass::Interactive));
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].peer_id, "peer-b");
+        assert_eq!(filtered[0].class, "interactive");
     }
 
     #[test]

@@ -8,13 +8,17 @@ use crypto::IdentityKeypair;
 use daemonapi::{
     AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus, ErrorCode, IdentityStatus,
     RequestEnvelope, ResponseEnvelope, RuntimeEventEntry, RuntimeEventsListResult,
-    RuntimeSessionEntry, RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary,
-    SessionClosePayload, SessionCloseResult, SessionConnectPayload, SessionConnectResult,
-    SessionConnectSummary, SessionReconcileEntry as ApiSessionReconcileEntry,
-    SessionReconcilePayload, SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
+    RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry,
+    RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary, SessionClosePayload,
+    SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
+    SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
+    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
 use fabric::SessionLifecycleTransport;
-use fabric::{DaemonConfig, LocalControlPlane, ProtocolId, SessionSnapshot, TrafficClass};
+use fabric::{
+    DaemonConfig, LocalControlPlane, PathSource, ProtocolId, RuntimePathAlternative,
+    RuntimePathSnapshot, RuntimePathState, SessionSnapshot, TrafficClass,
+};
 use identity::{FileKeystore, IdentityKeystore};
 use quic::QuicTransportAdapter;
 use rand::rngs::OsRng;
@@ -637,6 +641,7 @@ fn route_control_request(
             runtime_status_response(args, control, transport, local_identity, envelope)
         }
         "runtime.sessions.list" => runtime_sessions_response(control, transport, envelope),
+        "runtime.paths.list" => runtime_paths_response(control, transport, envelope),
         "runtime.events.list" => runtime_events_response(control, transport, envelope),
         "session.connect" => runtime.block_on(session_connect_response(
             control,
@@ -714,6 +719,15 @@ fn runtime_status_response(
     local_identity: &IdentityKeypair,
     envelope: RequestEnvelope,
 ) -> ResponseEnvelope {
+    let active_path_count = control
+        .runtime_paths(transport)
+        .map(|paths| {
+            paths
+                .into_iter()
+                .filter(|path| path.session_id.is_some())
+                .count()
+        })
+        .unwrap_or(0);
     let reconnect_state = match transport.reconnect_suppressions() {
         Ok(suppressions) if !suppressions.is_empty() => "suppressed".to_string(),
         Ok(_) => "idle".to_string(),
@@ -744,7 +758,7 @@ fn runtime_status_response(
                 },
                 runtime_summary: RuntimeSummary {
                     session_count: state.active_sessions().len(),
-                    active_path_count: state.active_sessions().len(),
+                    active_path_count,
                     reconnect_state,
                 },
             },
@@ -800,6 +814,23 @@ fn runtime_events_response(
                         details: event.details,
                     })
                     .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn runtime_paths_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.runtime_paths(transport) {
+        Ok(paths) => ResponseEnvelope::success(
+            envelope.request_id,
+            RuntimePathsListResult {
+                truth_kind: "runtime".to_string(),
+                paths: paths.into_iter().map(runtime_path_entry).collect(),
             },
         ),
         Err(error) => daemon_error_response(envelope.request_id, &error),
@@ -1041,6 +1072,51 @@ fn runtime_session_entry(session: &SessionSnapshot) -> RuntimeSessionEntry {
     }
 }
 
+fn runtime_path_entry(path: RuntimePathSnapshot) -> RuntimePathEntry {
+    RuntimePathEntry {
+        session_id: path
+            .session_id
+            .map(|session_id| hex_session_id(&session_id)),
+        peer_id: path.peer.to_string(),
+        protocol: path.protocol.map(|protocol| protocol.as_str().to_string()),
+        class: class_label(path.class).to_string(),
+        state: runtime_path_state_label(&path.state).to_string(),
+        path_class: path
+            .path_kind
+            .map(path_class_label)
+            .unwrap_or("unknown")
+            .to_string(),
+        source: path
+            .source
+            .as_ref()
+            .map(path_source_label)
+            .unwrap_or("runtime")
+            .to_string(),
+        relay_peer_id: path.relay_peer.map(|peer| peer.to_string()),
+        endpoint_summary: path.endpoint_summary,
+        score: path.score,
+        state_reason: path.state_reason,
+        summary: path.summary,
+        alternatives: path
+            .alternatives
+            .into_iter()
+            .map(runtime_path_alternative_entry)
+            .collect(),
+    }
+}
+
+fn runtime_path_alternative_entry(
+    alternative: RuntimePathAlternative,
+) -> RuntimePathAlternativeEntry {
+    RuntimePathAlternativeEntry {
+        path_class: path_class_label(alternative.path_kind).to_string(),
+        source: path_source_label(&alternative.source).to_string(),
+        relay_peer_id: alternative.relay_peer.map(|peer| peer.to_string()),
+        score: alternative.score,
+        summary: alternative.summary,
+    }
+}
+
 fn authority_revision(state: &fabric::DaemonState) -> String {
     let sequence = state.max_revocation_sequence().unwrap_or(0);
     format!(
@@ -1111,6 +1187,23 @@ fn path_class_label(path_kind: fabric::PathKind) -> &'static str {
     }
 }
 
+fn path_source_label(source: &PathSource) -> &'static str {
+    match source {
+        PathSource::Observed => "observed",
+        PathSource::Bootstrap => "bootstrap",
+        PathSource::AuthorityRelay => "authority_relay",
+    }
+}
+
+fn class_label(class: TrafficClass) -> &'static str {
+    match class {
+        TrafficClass::Control => "control",
+        TrafficClass::Interactive => "interactive",
+        TrafficClass::Bulk => "bulk",
+        TrafficClass::Background => "background",
+    }
+}
+
 fn runtime_state_label(state: &fabric::RuntimeSessionState) -> &'static str {
     match state {
         fabric::RuntimeSessionState::Pending => "pending",
@@ -1122,6 +1215,16 @@ fn runtime_state_label(state: &fabric::RuntimeSessionState) -> &'static str {
         fabric::RuntimeSessionState::Closing => "closing",
         fabric::RuntimeSessionState::Closed => "closed",
         fabric::RuntimeSessionState::Failed => "failed",
+    }
+}
+
+fn runtime_path_state_label(state: &RuntimePathState) -> &'static str {
+    match state {
+        RuntimePathState::Active => "active",
+        RuntimePathState::Degraded => "degraded",
+        RuntimePathState::Migrating => "migrating",
+        RuntimePathState::Failed => "failed",
+        RuntimePathState::Suppressed => "suppressed",
     }
 }
 

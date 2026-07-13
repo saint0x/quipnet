@@ -136,6 +136,38 @@ pub struct RuntimeSessionsListResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePathsListResult {
+    pub truth_kind: String,
+    pub paths: Vec<RuntimePathEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePathEntry {
+    pub session_id: Option<String>,
+    pub peer_id: String,
+    pub protocol: Option<String>,
+    pub class: String,
+    pub state: String,
+    pub path_class: String,
+    pub source: String,
+    pub relay_peer_id: Option<String>,
+    pub endpoint_summary: String,
+    pub score: Option<u32>,
+    pub state_reason: Option<String>,
+    pub summary: String,
+    pub alternatives: Vec<RuntimePathAlternativeEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimePathAlternativeEntry {
+    pub path_class: String,
+    pub source: String,
+    pub relay_peer_id: Option<String>,
+    pub score: u32,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSessionEntry {
     pub session_id: String,
     pub peer_id: String,
