@@ -7,6 +7,12 @@ services:
     environment:
       QUICNET_NETWORK: personalcloud-prod
       QUICNET_STATE_PATH: /var/lib/quicnet/state.json
+      QUICNET_IDENTITY_PATH: /var/lib/quicnet/identity.json
+      QUICNET_IDENTITY_PASSPHRASE_ENV: QUICNET_IDENTITY_PASSPHRASE
+      QUICNET_IDENTITY_PASSPHRASE: change-me-for-dev
+      QUICNET_AUTHORITY_ORIGIN: http://authority:8080
+      QUICNET_SYNC: "true"
+      QUICNET_REVOCATION_SYNC: "true"
     ports:
       - "4433:4433/udp"
     volumes:
@@ -17,6 +23,7 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    profiles: ["dev"]
 
   relay:
     image: quicnetd:dev

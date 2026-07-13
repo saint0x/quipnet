@@ -27,6 +27,34 @@ in
       type = lib.types.str;
       default = "/var/lib/quicnet/state.json";
     };
+    identityPath = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/quicnet/identity.json";
+    };
+    identityPassphraseEnvironmentVariable = lib.mkOption {
+      type = lib.types.str;
+      default = "QUICNET_IDENTITY_PASSPHRASE";
+    };
+    environmentFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+    };
+    authorityOrigin = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+    };
+    authoritySubject = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+    };
+    sync = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
+    revocationSync = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -45,13 +73,23 @@ in
       after = ["network-online.target"];
       wants = ["network-online.target"];
       serviceConfig = {
-        ExecStart = "${lib.getExe cfg.package} --network ${lib.escapeShellArg cfg.network} --state-path ${lib.escapeShellArg cfg.statePath}";
+        ExecStart = ''
+          ${pkgs.bash}/bin/sh -ec '
+            set -- --network ${lib.escapeShellArg cfg.network} --state-path ${lib.escapeShellArg cfg.statePath} --identity-path ${lib.escapeShellArg cfg.identityPath} --identity-passphrase-env ${lib.escapeShellArg cfg.identityPassphraseEnvironmentVariable}
+            ${lib.optionalString cfg.sync "set -- \"$@\" --sync"}
+            ${lib.optionalString cfg.revocationSync "set -- \"$@\" --revocation-sync"}
+            ${lib.optionalString (cfg.authorityOrigin != null) "set -- \"$@\" --authority-origin ${lib.escapeShellArg cfg.authorityOrigin}"}
+            ${lib.optionalString (cfg.authoritySubject != null) "set -- \"$@\" --authority-subject ${lib.escapeShellArg cfg.authoritySubject}"}
+            exec ${lib.getExe cfg.package} "$@"
+          '
+        '';
         DynamicUser = false;
         User = "quicnet";
         Group = "quicnet";
         Restart = "on-failure";
         StateDirectory = "quicnet";
       };
+      environmentFiles = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
     };
   };
 }

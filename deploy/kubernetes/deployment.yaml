@@ -20,14 +20,32 @@ spec:
         - name: quicnetd
           image: quicnetd:dev
           imagePullPolicy: IfNotPresent
-          args:
-            - --network
-            - $(QUICNET_NETWORK)
-            - --state-path
-            - $(QUICNET_STATE_PATH)
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              set -- --network "$QUICNET_NETWORK" --state-path "$QUICNET_STATE_PATH" --identity-path "$QUICNET_IDENTITY_PATH" --identity-passphrase-env "$QUICNET_IDENTITY_PASSPHRASE_ENV"
+              if [ "$QUICNET_SYNC" = "true" ]; then
+                set -- "$@" --sync
+              fi
+              if [ "$QUICNET_REVOCATION_SYNC" = "true" ]; then
+                set -- "$@" --revocation-sync
+              fi
+              if [ -n "${QUICNET_AUTHORITY_ORIGIN:-}" ]; then
+                set -- "$@" --authority-origin "$QUICNET_AUTHORITY_ORIGIN"
+              fi
+              if [ -n "${QUICNET_AUTHORITY_SUBJECT:-}" ]; then
+                set -- "$@" --authority-subject "$QUICNET_AUTHORITY_SUBJECT"
+              fi
+              if [ -n "${QUICNET_AUTHORITY_SNAPSHOT:-}" ]; then
+                set -- "$@" --authority-snapshot "$QUICNET_AUTHORITY_SNAPSHOT"
+              fi
+              exec /usr/local/bin/quicnetd "$@"
           envFrom:
             - configMapRef:
                 name: quicnet-config
+            - secretRef:
+                name: quicnet-secrets
           ports:
             - name: quic-udp
               containerPort: 4433
@@ -49,4 +67,5 @@ spec:
             readOnlyRootFilesystem: true
       volumes:
         - name: state
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: quicnet-state

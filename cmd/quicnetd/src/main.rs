@@ -7,6 +7,7 @@ use fabric::{DaemonConfig, LocalControlPlane, ProtocolId, SessionSnapshot, Traff
 use identity::{FileKeystore, IdentityKeystore};
 use quic::QuicTransportAdapter;
 use rand::rngs::OsRng;
+use std::error::Error;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -25,7 +26,7 @@ struct Args {
     #[arg(long)]
     authority_snapshot: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "authority_snapshot")]
     authority_origin: Option<String>,
 
     #[arg(long)]
@@ -115,6 +116,13 @@ struct DaemonTriggerMonitor {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     observability::init_tracing("quicnetd");
     let args = Args::parse();
     let control = LocalControlPlane::new(DaemonConfig::new(
@@ -122,7 +130,7 @@ async fn main() {
         args.state_path.clone(),
     ));
 
-    initialize_state(&args, &control).expect("daemon state should persist");
+    initialize_state(&args, &control)?;
     let mut trigger_monitor = DaemonTriggerMonitor::new(&args);
     let mut trigger = if args.force_network_reprobe {
         CycleTrigger::NetworkChangeRequested
@@ -131,13 +139,7 @@ async fn main() {
     };
 
     loop {
-        let report = match run_cycle(&args, &control, trigger.clone()).await {
-            Ok(report) => report,
-            Err(error) => {
-                eprintln!("quicnetd cycle failed: {error}");
-                std::process::exit(1);
-            }
-        };
+        let report = run_cycle(&args, &control, trigger.clone()).await?;
         emit_cycle_report(&args, &report);
 
         if args.one_shot {
@@ -151,12 +153,10 @@ async fn main() {
                 println!("quicnetd stopping: received interrupt");
                 break;
             }
-            Err(WaitOutcome::SignalError(error)) => {
-                eprintln!("quicnetd signal handling failed: {error}");
-                std::process::exit(1);
-            }
+            Err(WaitOutcome::SignalError(error)) => return Err(error.into()),
         }
     }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -192,9 +192,9 @@ fn initialize_state(
             }
         }
         (None, None) => control.refresh_and_persist(),
-        (Some(_), Some(_)) => {
-            panic!("only one of --authority-snapshot or --authority-origin may be supplied")
-        }
+        (Some(_), Some(_)) => Err(fabric::DaemonStateError::InvalidSession(
+            "only one of --authority-snapshot or --authority-origin may be supplied".to_string(),
+        )),
     }?;
 
     if args.revocation_sync {
@@ -260,22 +260,20 @@ async fn run_cycle(
                 entries: Vec::new(),
             })
         } else {
-            let transport = daemon_transport(args);
+            let transport = daemon_transport(args)
+                .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
             let report = control.reconcile_sessions(&transport).await?;
-            state = control
-                .ensure_state()
-                .expect("daemon state should remain readable after reconcile");
+            state = control.ensure_state()?;
             Some(report)
         }
     };
     let (active_session, connect_status) = match args.connect_protocol.as_deref() {
         Some(protocol) => {
-            let transport = daemon_transport(args);
+            let transport = daemon_transport(args)
+                .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
             match ensure_target_session(args, control, &state, transport, protocol).await {
                 Ok(Some(session)) => {
-                    state = control
-                        .ensure_state()
-                        .expect("daemon state should remain readable after connect");
+                    state = control.ensure_state()?;
                     (Some(session), "active".to_string())
                 }
                 Ok(None) => {
@@ -315,8 +313,13 @@ async fn ensure_target_session(
         .as_deref()
         .and_then(|value| value.parse().ok())
         .or_else(|| state.first_peer().map(|peer| peer.snapshot.peer.clone()))
-        .expect("a peer is required or must exist in state");
-    let protocol = ProtocolId::new(protocol).expect("connect protocol must be valid");
+        .ok_or_else(|| {
+            fabric::DaemonStateError::InvalidSession(
+                "a peer is required or daemon state must contain at least one peer".to_string(),
+            )
+        })?;
+    let protocol = ProtocolId::new(protocol)
+        .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
     let session = control
         .realize_best_path(
             &target,
@@ -417,9 +420,12 @@ fn parse_class(value: &str) -> TrafficClass {
     }
 }
 
-fn daemon_transport(args: &Args) -> QuicTransportAdapter {
-    let identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env);
-    QuicTransportAdapter::with_identity(fabric::NetworkId::derive(&args.network), identity)
+fn daemon_transport(args: &Args) -> Result<QuicTransportAdapter, Box<dyn Error>> {
+    let identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env)?;
+    Ok(QuicTransportAdapter::with_identity(
+        fabric::NetworkId::derive(&args.network),
+        identity,
+    ))
 }
 
 fn prepare_state_for_trigger(
@@ -540,21 +546,25 @@ fn reprobe_summary_line(report: &fabric::NetcheckReprobeReport) -> String {
     )
 }
 
-fn load_or_init_identity(identity_path: &str, passphrase_env: &str) -> IdentityKeypair {
-    let passphrase = std::env::var(passphrase_env)
-        .unwrap_or_else(|_| panic!("identity passphrase env var {passphrase_env} must be set"));
+fn load_or_init_identity(
+    identity_path: &str,
+    passphrase_env: &str,
+) -> Result<IdentityKeypair, Box<dyn Error>> {
+    let passphrase = std::env::var(passphrase_env).map_err(|_| {
+        std::io::Error::other(format!(
+            "identity passphrase env var {passphrase_env} must be set"
+        ))
+    })?;
     let keystore = FileKeystore::new(identity_path);
     match keystore.load(&passphrase) {
-        Ok(identity) => identity,
+        Ok(identity) => Ok(identity),
         Err(_) => {
             if let Some(parent) = std::path::Path::new(identity_path).parent() {
-                std::fs::create_dir_all(parent).expect("identity directory should be creatable");
+                std::fs::create_dir_all(parent)?;
             }
             let identity = IdentityKeypair::generate(&mut OsRng);
-            keystore
-                .store(&identity, &passphrase)
-                .expect("identity keystore should store");
-            identity
+            keystore.store(&identity, &passphrase)?;
+            Ok(identity)
         }
     }
 }

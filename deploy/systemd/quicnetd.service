@@ -9,7 +9,12 @@ User=quicnet
 Group=quicnet
 Environment=QUICNET_NETWORK=personalcloud-prod
 Environment=QUICNET_STATE_PATH=/var/lib/quicnet/state.json
-ExecStart=/usr/local/bin/quicnetd --network ${QUICNET_NETWORK} --state-path ${QUICNET_STATE_PATH}
+Environment=QUICNET_IDENTITY_PATH=/var/lib/quicnet/identity.json
+Environment=QUICNET_IDENTITY_PASSPHRASE_ENV=QUICNET_IDENTITY_PASSPHRASE
+Environment=QUICNET_SYNC=true
+Environment=QUICNET_REVOCATION_SYNC=true
+EnvironmentFile=-/etc/quipnet/quipnetd.env
+ExecStart=/bin/sh -ec 'set -- --network "$QUICNET_NETWORK" --state-path "$QUICNET_STATE_PATH" --identity-path "$QUICNET_IDENTITY_PATH" --identity-passphrase-env "$QUICNET_IDENTITY_PASSPHRASE_ENV"; if [ "${QUICNET_SYNC}" = "true" ]; then set -- "$@" --sync; fi; if [ "${QUICNET_REVOCATION_SYNC}" = "true" ]; then set -- "$@" --revocation-sync; fi; if [ -n "${QUICNET_AUTHORITY_ORIGIN:-}" ]; then set -- "$@" --authority-origin "$QUICNET_AUTHORITY_ORIGIN"; fi; if [ -n "${QUICNET_AUTHORITY_SUBJECT:-}" ]; then set -- "$@" --authority-subject "$QUICNET_AUTHORITY_SUBJECT"; fi; if [ -n "${QUICNET_AUTHORITY_SNAPSHOT:-}" ]; then set -- "$@" --authority-snapshot "$QUICNET_AUTHORITY_SNAPSHOT"; fi; exec /usr/local/bin/quicnetd "$@"'
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s

@@ -5,6 +5,7 @@ use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
 use quic::QuicTransportAdapter;
 use rand::rngs::OsRng;
+use std::error::Error;
 use std::path::Path;
 use std::time::Duration;
 
@@ -113,6 +114,13 @@ enum PathCommand {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     observability::init_tracing("quicnet");
     let cli = Cli::parse();
     let control = LocalControlPlane::new(DaemonConfig::new(
@@ -121,8 +129,7 @@ async fn main() {
     ));
     match cli.command.unwrap_or(Command::Status) {
         Command::IdentityInit { overwrite } => {
-            let identity =
-                init_identity(&cli.identity_path, &cli.identity_passphrase_env, overwrite);
+            let identity = init_identity(&cli.identity_path, &cli.identity_passphrase_env, overwrite)?;
             println!(
                 "identity_path={} peer={} public_key_hex={}",
                 cli.identity_path,
@@ -131,9 +138,7 @@ async fn main() {
             );
         }
         Command::Join { authority_snapshot } => {
-            let state = control
-                .seed_from_authority_snapshot(&authority_snapshot)
-                .expect("authority snapshot should seed daemon state");
+            let state = control.seed_from_authority_snapshot(&authority_snapshot)?;
             println!(
                 "joined network={} local_peer={} bootstrap={} state_path={}",
                 state.network,
@@ -146,9 +151,8 @@ async fn main() {
             authority_origin,
             authority_subject,
         } => {
-            let state = control
-                .seed_from_authority_origin(&authority_origin, authority_subject.as_deref())
-                .expect("authority origin should seed daemon state");
+            let state =
+                control.seed_from_authority_origin(&authority_origin, authority_subject.as_deref())?;
             println!(
                 "joined network={} local_peer={} bootstrap={} state_path={} authority_origin={} authority_subject={}",
                 state.network,
@@ -160,9 +164,7 @@ async fn main() {
             );
         }
         Command::Sync { authority_snapshot } => {
-            let (state, report) = control
-                .sync_authority_snapshot(&authority_snapshot)
-                .expect("authority snapshot should sync daemon state");
+            let (state, report) = control.sync_authority_snapshot(&authority_snapshot)?;
             println!(
                 "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={}",
                 state.network,
@@ -179,9 +181,8 @@ async fn main() {
             authority_origin,
             authority_subject,
         } => {
-            let (state, report) = control
-                .sync_authority_origin(&authority_origin, authority_subject.as_deref())
-                .expect("authority origin should sync daemon state");
+            let (state, report) =
+                control.sync_authority_origin(&authority_origin, authority_subject.as_deref())?;
             println!(
                 "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={} authority_origin={} authority_subject={}",
                 state.network,
@@ -197,9 +198,8 @@ async fn main() {
             );
         }
         Command::SyncRevocationsOrigin { authority_origin } => {
-            let (state, revocations_added) = control
-                .sync_authority_revocations_origin(&authority_origin)
-                .expect("authority revocation origin should sync daemon state");
+            let (state, revocations_added) =
+                control.sync_authority_revocations_origin(&authority_origin)?;
             println!(
                 "synced-revocations network={} local_peer={} revocations_added={} denied={} state_path={} authority_origin={}",
                 state.network,
@@ -211,15 +211,11 @@ async fn main() {
             );
         }
         Command::Status => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
+            let state = control.ensure_state()?;
             println!("{}", state.status_line());
         }
         Command::Peers => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
+            let state = control.ensure_state()?;
             for peer in &state.peers {
                 let denied = state
                     .deny_reason(&peer.snapshot.peer)
@@ -236,14 +232,9 @@ async fn main() {
             }
         }
         Command::PeerInspect { peer } => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
-            let target = peer
-                .and_then(|value| value.parse().ok())
-                .or_else(|| state.first_peer().map(|entry| entry.snapshot.peer.clone()))
-                .expect("a peer is required or must exist in state");
-            let (inspection, best_path) = control.inspect_peer(&target).expect("peer inspection");
+            let state = control.ensure_state()?;
+            let target = resolve_peer(peer.as_deref(), &state)?;
+            let (inspection, best_path) = control.inspect_peer(&target)?;
             println!(
                 "{} {:?} {:?} {:?} records={}",
                 inspection.snapshot.peer,
@@ -260,27 +251,18 @@ async fn main() {
             }
         }
         Command::PolicyExplain { peer, protocol } => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
-            let target = peer
-                .and_then(|value| value.parse().ok())
-                .or_else(|| state.first_peer().map(|entry| entry.snapshot.peer.clone()))
-                .expect("a peer is required or must exist in state");
+            let state = control.ensure_state()?;
+            let target = resolve_peer(peer.as_deref(), &state)?;
             let protocol =
-                ProtocolId::new(protocol).expect("protocol ids supplied to CLI must be valid");
-            let decision = control
-                .explain_policy(&target, &protocol)
-                .expect("policy explanation should succeed");
+                ProtocolId::new(protocol).map_err(|error| usage_error(error.to_string()))?;
+            let decision = control.explain_policy(&target, &protocol)?;
             println!(
                 "peer={} protocol={} allowed={} reason={}",
                 target, protocol, decision.allowed, decision.reason
             );
         }
         Command::Netcheck => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
+            let state = control.ensure_state()?;
             println!("{}", state.netcheck.summary());
             for warning in state.netcheck.warnings() {
                 println!("warning: {}", warning);
@@ -288,11 +270,9 @@ async fn main() {
         }
         Command::Path { command } => match command {
             PathCommand::Show { peer, class } => {
-                let state = control
-                    .ensure_state()
-                    .expect("daemon state should be readable or creatable");
+                let state = control.ensure_state()?;
                 let class = parse_class(&class);
-                let peer = resolve_peer(peer.as_deref(), &state);
+                let peer = resolve_peer(peer.as_deref(), &state)?;
                 if let Some(snapshot) = render_path_snapshot(&state, &peer, class) {
                     println!("{}", snapshot);
                 } else {
@@ -309,10 +289,8 @@ async fn main() {
                 let interval = Duration::from_millis(interval_ms.max(1));
                 let mut previous = None;
                 for index in 0..sample_limit.max(1) {
-                    let state = control
-                        .ensure_state()
-                        .expect("daemon state should be readable or creatable");
-                    let target = resolve_peer(peer.as_deref(), &state);
+                    let state = control.ensure_state()?;
+                    let target = resolve_peer(peer.as_deref(), &state)?;
                     let snapshot =
                         render_path_snapshot(&state, &target, class).unwrap_or_else(|| {
                             format!(
@@ -336,30 +314,18 @@ async fn main() {
             peer,
             class,
         } => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
-            let target = peer
-                .and_then(|value| value.parse().ok())
-                .or_else(|| state.first_peer().map(|entry| entry.snapshot.peer.clone()))
-                .expect("a peer is required or must exist in state");
+            let state = control.ensure_state()?;
+            let target = resolve_peer(peer.as_deref(), &state)?;
             let protocol =
-                ProtocolId::new(protocol).expect("protocol ids supplied to CLI must be valid");
+                ProtocolId::new(protocol).map_err(|error| usage_error(error.to_string()))?;
             let class = parse_class(&class);
             let transport = QuicTransportAdapter::with_identity(
                 fabric::NetworkId::derive(&cli.network),
-                load_identity(&cli.identity_path, &cli.identity_passphrase_env),
+                load_identity(&cli.identity_path, &cli.identity_passphrase_env)?,
             );
-            let session = match control
+            let session = control
                 .realize_best_path(&target, &protocol, class, &transport)
-                .await
-            {
-                Ok(session) => session,
-                Err(error) => {
-                    eprintln!("connect failed: {error}");
-                    std::process::exit(1);
-                }
-            };
+                .await?;
             println!(
                 "session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={}",
                 hex_session_id(&session.session_id),
@@ -386,9 +352,7 @@ async fn main() {
             );
         }
         Command::SessionStatus => {
-            let sessions = control
-                .session_snapshots()
-                .expect("daemon state should be readable or creatable");
+            let sessions = control.session_snapshots()?;
             if sessions.is_empty() {
                 println!("no active sessions");
             } else {
@@ -424,36 +388,20 @@ async fn main() {
             }
         }
         Command::SessionClose { session } => {
-            let sessions = control
-                .session_snapshots()
-                .expect("daemon state should be readable or creatable");
-            let session_id = resolve_session_id(session.as_deref(), &sessions);
+            let sessions = control.session_snapshots()?;
+            let session_id = resolve_session_id(session.as_deref(), &sessions)?;
             let transport = QuicTransportAdapter::default();
-            control
-                .close_session(&session_id, &transport)
-                .await
-                .unwrap_or_else(|error| {
-                    eprintln!("session-close failed: {error}");
-                    std::process::exit(1);
-                });
+            control.close_session(&session_id, &transport).await?;
             println!("closed session_id={}", hex_session_id(&session_id));
         }
         Command::SessionUpgrade { session } => {
-            let sessions = control
-                .session_snapshots()
-                .expect("daemon state should be readable or creatable");
-            let session_id = resolve_session_id(session.as_deref(), &sessions);
+            let sessions = control.session_snapshots()?;
+            let session_id = resolve_session_id(session.as_deref(), &sessions)?;
             let transport = QuicTransportAdapter::with_identity(
                 fabric::NetworkId::derive(&cli.network),
-                load_identity(&cli.identity_path, &cli.identity_passphrase_env),
+                load_identity(&cli.identity_path, &cli.identity_passphrase_env)?,
             );
-            let session = control
-                .upgrade_session(&session_id, &transport)
-                .await
-                .unwrap_or_else(|error| {
-                    eprintln!("session-upgrade failed: {error}");
-                    std::process::exit(1);
-                });
+            let session = control.upgrade_session(&session_id, &transport).await?;
             println!(
                 "session_id={} transport_session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={}",
                 hex_session_id(&session.session_id),
@@ -485,15 +433,9 @@ async fn main() {
         Command::SessionReconcile => {
             let transport = QuicTransportAdapter::with_identity(
                 fabric::NetworkId::derive(&cli.network),
-                load_identity(&cli.identity_path, &cli.identity_passphrase_env),
+                load_identity(&cli.identity_path, &cli.identity_passphrase_env)?,
             );
-            let report = control
-                .reconcile_sessions(&transport)
-                .await
-                .unwrap_or_else(|error| {
-                    eprintln!("session-reconcile failed: {error}");
-                    std::process::exit(1);
-                });
+            let report = control.reconcile_sessions(&transport).await?;
             println!(
                 "examined={} unchanged={} upgraded={} closed={}",
                 report.examined, report.unchanged, report.upgraded, report.closed
@@ -513,9 +455,7 @@ async fn main() {
             }
         }
         Command::RelayStatus => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
+            let state = control.ensure_state()?;
             if state.relay_announcements().is_empty() {
                 println!("no relay announcements available");
             } else {
@@ -535,6 +475,7 @@ async fn main() {
             }
         }
     }
+    Ok(())
 }
 
 fn class_label(class: TrafficClass) -> &'static str {
@@ -546,10 +487,10 @@ fn class_label(class: TrafficClass) -> &'static str {
     }
 }
 
-fn resolve_peer(peer: Option<&str>, state: &fabric::DaemonState) -> PeerId {
+fn resolve_peer(peer: Option<&str>, state: &fabric::DaemonState) -> Result<PeerId, std::io::Error> {
     peer.and_then(|value| value.parse().ok())
         .or_else(|| state.first_peer().map(|entry| entry.snapshot.peer.clone()))
-        .expect("a peer is required or must exist in daemon state")
+        .ok_or_else(|| usage_error("a peer is required or daemon state must contain at least one peer"))
 }
 
 fn render_path_snapshot(
@@ -625,50 +566,68 @@ fn hex_session_id(session_id: &[u8; 16]) -> String {
         .collect::<String>()
 }
 
-fn resolve_session_id(session: Option<&str>, sessions: &[fabric::SessionSnapshot]) -> [u8; 16] {
-    session
-        .map(parse_hex_session_id)
-        .or_else(|| sessions.first().map(|entry| entry.session_id))
-        .expect("a session id is required or an active session must exist")
+fn resolve_session_id(
+    session: Option<&str>,
+    sessions: &[fabric::SessionSnapshot],
+) -> Result<[u8; 16], std::io::Error> {
+    if let Some(session) = session {
+        parse_hex_session_id(session)
+    } else {
+        sessions
+            .first()
+            .map(|entry| entry.session_id)
+            .ok_or_else(|| usage_error("a session id is required or an active session must exist"))
+    }
 }
 
-fn parse_hex_session_id(value: &str) -> [u8; 16] {
-    assert_eq!(
-        value.len(),
-        32,
-        "session ids supplied to CLI must be 32 hex characters"
-    );
+fn parse_hex_session_id(value: &str) -> Result<[u8; 16], std::io::Error> {
+    if value.len() != 32 {
+        return Err(usage_error(
+            "session ids supplied to CLI must be 32 hex characters",
+        ));
+    }
     let mut session_id = [0_u8; 16];
     for (index, slot) in session_id.iter_mut().enumerate() {
         let offset = index * 2;
         *slot = u8::from_str_radix(&value[offset..offset + 2], 16)
-            .expect("session ids supplied to CLI must be valid hex");
+            .map_err(|_| usage_error("session ids supplied to CLI must be valid hex"))?;
     }
-    session_id
+    Ok(session_id)
 }
 
-fn load_identity(identity_path: &str, passphrase_env: &str) -> IdentityKeypair {
+fn load_identity(identity_path: &str, passphrase_env: &str) -> Result<IdentityKeypair, Box<dyn Error>> {
     let passphrase = std::env::var(passphrase_env)
-        .unwrap_or_else(|_| panic!("identity passphrase env var {passphrase_env} must be set"));
+        .map_err(|_| usage_error(format!("identity passphrase env var {passphrase_env} must be set")))?;
     FileKeystore::new(identity_path)
         .load(&passphrase)
-        .expect("identity keystore should load")
+        .map_err(Into::into)
 }
 
-fn init_identity(identity_path: &str, passphrase_env: &str, overwrite: bool) -> IdentityKeypair {
+fn init_identity(
+    identity_path: &str,
+    passphrase_env: &str,
+    overwrite: bool,
+) -> Result<IdentityKeypair, Box<dyn Error>> {
     if Path::new(identity_path).exists() && !overwrite {
-        panic!("identity path already exists; rerun with --overwrite to replace it");
+        return Err(usage_error(
+            "identity path already exists; rerun with --overwrite to replace it",
+        )
+        .into());
     }
     let passphrase = std::env::var(passphrase_env)
-        .unwrap_or_else(|_| panic!("identity passphrase env var {passphrase_env} must be set"));
+        .map_err(|_| usage_error(format!("identity passphrase env var {passphrase_env} must be set")))?;
     if let Some(parent) = Path::new(identity_path).parent() {
-        std::fs::create_dir_all(parent).expect("identity directory should be creatable");
+        std::fs::create_dir_all(parent)?;
     }
     let identity = IdentityKeypair::generate(&mut OsRng);
     FileKeystore::new(identity_path)
         .store(&identity, &passphrase)
-        .expect("identity keystore should store");
-    identity
+        ?;
+    Ok(identity)
+}
+
+fn usage_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
 }
 
 fn hex_public_key(identity: &IdentityKeypair) -> String {
@@ -726,5 +685,24 @@ mod tests {
 
         assert_eq!(alternatives.len(), 1);
         assert!(alternatives[0].starts_with("Relay/score="));
+    }
+
+    #[test]
+    fn parse_hex_session_id_rejects_invalid_length() {
+        let error = parse_hex_session_id("abcd").expect_err("invalid length should fail");
+
+        assert!(error
+            .to_string()
+            .contains("32 hex characters"));
+    }
+
+    #[test]
+    fn resolve_peer_requires_existing_peer() {
+        let mut state = fabric::fixture_daemon_state("empty-peers");
+        state.peers.clear();
+
+        let error = resolve_peer(None, &state).expect_err("missing peer should fail");
+
+        assert!(error.to_string().contains("a peer is required"));
     }
 }
