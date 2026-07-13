@@ -5,8 +5,8 @@ metadata:
   namespace: quicnet-system
 data:
   QUICNET_NETWORK: personalcloud-prod
-  QUICNET_STATE_PATH: /var/lib/quicnet/state.json
-  QUICNET_IDENTITY_PATH: /var/lib/quicnet/identity.json
+  QUICNET_STATE_PATH: /home/quicnet/.quip/quicnet/state.json
+  QUICNET_IDENTITY_PATH: /home/quicnet/.quip/quicnet/identity.json
   QUICNET_IDENTITY_PASSPHRASE_ENV: QUICNET_IDENTITY_PASSPHRASE
   QUICNET_AUTHORITY_ORIGIN: https://authority.quipnet.example
   QUICNET_AUTHORITY_SUBJECT: ""

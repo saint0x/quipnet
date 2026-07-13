@@ -8,8 +8,8 @@ Type=simple
 User=quicnet
 Group=quicnet
 Environment=QUICNET_NETWORK=personalcloud-prod
-Environment=QUICNET_STATE_PATH=/var/lib/quicnet/state.json
-Environment=QUICNET_IDENTITY_PATH=/var/lib/quicnet/identity.json
+Environment=QUICNET_STATE_PATH=/var/lib/quicnet/.quip/quicnet/state.json
+Environment=QUICNET_IDENTITY_PATH=/var/lib/quicnet/.quip/quicnet/identity.json
 Environment=QUICNET_IDENTITY_PASSPHRASE_ENV=QUICNET_IDENTITY_PASSPHRASE
 Environment=QUICNET_SYNC=true
 Environment=QUICNET_REVOCATION_SYNC=true
@@ -21,7 +21,7 @@ RestartSec=5s
 RuntimeDirectory=quicnet
 StateDirectory=quicnet
 CacheDirectory=quicnet
-WorkingDirectory=/var/lib/quicnet
+WorkingDirectory=/var/lib/quicnet/.quip/quicnet
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

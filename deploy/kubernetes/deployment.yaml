@@ -52,7 +52,7 @@ spec:
               protocol: UDP
           volumeMounts:
             - name: state
-              mountPath: /var/lib/quicnet
+              mountPath: /home/quicnet/.quip/quicnet
           readinessProbe:
             exec:
               command:

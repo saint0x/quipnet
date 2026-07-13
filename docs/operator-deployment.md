@@ -13,7 +13,7 @@ Quipnet production nodes must boot with a durable runtime identity, durable daem
 
 Production nodes should always:
 
-- persist `/var/lib/quicnet`
+- persist `~/.quip/quicnet`
 - inject `QUICNET_IDENTITY_PASSPHRASE` from a secret manager or encrypted environment file
 - set `--sync` and `--revocation-sync`
 - bootstrap from an authority origin unless deliberately operating from an offline snapshot
@@ -28,11 +28,11 @@ Losing `identity.json` or changing the passphrase unexpectedly creates an operat
 - `QUICNET_AUTHORITY_ORIGIN`
 - optional `QUICNET_AUTHORITY_SUBJECT`
 
-The service persists state under `/var/lib/quicnet`.
+The service persists state under `~quicnet/.quip/quicnet`, which maps to `/var/lib/quicnet/.quip/quicnet` in the provided unit.
 
 ## Docker
 
-[`deploy/docker/Dockerfile`](../deploy/docker/Dockerfile) and [`deploy/docker/docker-compose.dev.yaml`](../deploy/docker/docker-compose.dev.yaml) now mount `/var/lib/quicnet` and pass the same bootstrap variables into the container. For production, replace the development passphrase placeholder and inject the secret from your container platform rather than committing it into Compose files.
+[`deploy/docker/Dockerfile`](../deploy/docker/Dockerfile) and [`deploy/docker/docker-compose.dev.yaml`](../deploy/docker/docker-compose.dev.yaml) now mount `~quicnet/.quip/quicnet` and pass the same bootstrap variables into the container. For production, replace the development passphrase placeholder and inject the secret from your container platform rather than committing it into Compose files.
 
 ## Kubernetes
 
@@ -40,7 +40,7 @@ The service persists state under `/var/lib/quicnet`.
 
 - [`deploy/kubernetes/configmap.yaml`](../deploy/kubernetes/configmap.yaml) for bootstrap configuration
 - [`deploy/kubernetes/secret.yaml`](../deploy/kubernetes/secret.yaml) for `QUICNET_IDENTITY_PASSPHRASE`
-- [`deploy/kubernetes/pvc.yaml`](../deploy/kubernetes/pvc.yaml) for durable `/var/lib/quicnet`
+- [`deploy/kubernetes/pvc.yaml`](../deploy/kubernetes/pvc.yaml) for durable `~/.quip/quicnet`
 
 Replace the placeholder secret before deployment. Do not use `emptyDir` for real nodes unless the node is intentionally ephemeral.
 

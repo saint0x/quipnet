@@ -14,10 +14,10 @@ struct Cli {
     #[arg(long, default_value = "personalcloud-prod")]
     network: String,
 
-    #[arg(long, default_value = "./var/quicnetd/state.json")]
+    #[arg(long, default_value = "~/.quip/quicnet/state.json")]
     state_path: String,
 
-    #[arg(long, default_value = "./var/quicnetd/identity.json")]
+    #[arg(long, default_value = "~/.quip/quicnet/identity.json")]
     identity_path: String,
 
     #[arg(long, default_value = "QUICNET_IDENTITY_PASSPHRASE")]
@@ -122,7 +122,8 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     observability::init_tracing("quicnet");
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    normalize_cli_paths(&mut cli);
     let control = LocalControlPlane::new(DaemonConfig::new(
         cli.network.clone(),
         cli.state_path.clone(),
@@ -584,6 +585,20 @@ fn runtime_session_cli_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 
+fn normalize_cli_paths(cli: &mut Cli) {
+    cli.state_path = expand_home_path(&cli.state_path);
+    cli.identity_path = expand_home_path(&cli.identity_path);
+}
+
+fn expand_home_path(path: &str) -> String {
+    if let Some(suffix) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{suffix}");
+        }
+    }
+    path.to_string()
+}
+
 fn hex_public_key(identity: &IdentityKeypair) -> String {
     identity
         .public_key()
@@ -667,5 +682,22 @@ mod tests {
         );
 
         assert!(error.to_string().contains("daemon-owned runtime"));
+    }
+
+    #[test]
+    fn expand_home_path_uses_home_environment() {
+        let original = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", "/tmp/quip-home");
+        }
+
+        let expanded = expand_home_path("~/.quip/quicnet/state.json");
+
+        match original {
+            Some(home) => unsafe { std::env::set_var("HOME", home) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert_eq!(expanded, "/tmp/quip-home/.quip/quicnet/state.json");
     }
 }

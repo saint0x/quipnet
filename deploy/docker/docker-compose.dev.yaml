@@ -6,8 +6,8 @@ services:
     image: quicnetd:dev
     environment:
       QUICNET_NETWORK: personalcloud-prod
-      QUICNET_STATE_PATH: /var/lib/quicnet/state.json
-      QUICNET_IDENTITY_PATH: /var/lib/quicnet/identity.json
+      QUICNET_STATE_PATH: /home/quicnet/.quip/quicnet/state.json
+      QUICNET_IDENTITY_PATH: /home/quicnet/.quip/quicnet/identity.json
       QUICNET_IDENTITY_PASSPHRASE_ENV: QUICNET_IDENTITY_PASSPHRASE
       QUICNET_IDENTITY_PASSPHRASE: change-me-for-dev
       QUICNET_AUTHORITY_ORIGIN: http://authority:8080
@@ -16,9 +16,9 @@ services:
     ports:
       - "4433:4433/udp"
     volumes:
-      - quicnet-data:/var/lib/quicnet
+      - quicnet-data:/home/quicnet/.quip/quicnet
     healthcheck:
-      test: ["CMD", "/usr/local/bin/quicnet", "--network", "personalcloud-prod", "--state-path", "/var/lib/quicnet/state.json", "status"]
+      test: ["CMD", "/usr/local/bin/quicnet", "--network", "personalcloud-prod", "--state-path", "/home/quicnet/.quip/quicnet/state.json", "status"]
       interval: 30s
       timeout: 5s
       retries: 3

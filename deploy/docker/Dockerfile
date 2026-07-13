@@ -16,20 +16,20 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ENV QUICNET_NETWORK=personalcloud-prod \
-    QUICNET_STATE_PATH=/var/lib/quicnet/state.json \
-    QUICNET_IDENTITY_PATH=/var/lib/quicnet/identity.json \
+    QUICNET_STATE_PATH=/home/quicnet/.quip/quicnet/state.json \
+    QUICNET_IDENTITY_PATH=/home/quicnet/.quip/quicnet/identity.json \
     QUICNET_IDENTITY_PASSPHRASE_ENV=QUICNET_IDENTITY_PASSPHRASE \
     QUICNET_SYNC=true \
     QUICNET_REVOCATION_SYNC=true
 
-RUN useradd --system --home-dir /var/lib/quicnet --create-home --shell /usr/sbin/nologin quicnet
-WORKDIR /var/lib/quicnet
+RUN useradd --system --home-dir /home/quicnet --create-home --shell /usr/sbin/nologin quicnet
+WORKDIR /home/quicnet/.quip/quicnet
 
 COPY --from=builder /workspace/target/release/quicnetd /usr/local/bin/quicnetd
 COPY --from=builder /workspace/target/release/quicnet /usr/local/bin/quicnet
 COPY --from=builder /workspace/target/release/relay /usr/local/bin/relay
 
-VOLUME ["/var/lib/quicnet"]
+VOLUME ["/home/quicnet/.quip/quicnet"]
 EXPOSE 4433/udp
 USER quicnet
 

@@ -25,11 +25,11 @@ in
     };
     statePath = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/quicnet/state.json";
+      default = "/var/lib/quicnet/.quip/quicnet/state.json";
     };
     identityPath = lib.mkOption {
       type = lib.types.str;
-      default = "/var/lib/quicnet/identity.json";
+      default = "/var/lib/quicnet/.quip/quicnet/identity.json";
     };
     identityPassphraseEnvironmentVariable = lib.mkOption {
       type = lib.types.str;

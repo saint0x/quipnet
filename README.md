@@ -17,8 +17,8 @@ The code takes the target architecture seriously and intentionally avoids compat
 
 Every real Quipnet node needs the same four inputs, regardless of whether it runs under systemd, Docker, Kubernetes, or Nix:
 
-- a durable state path, usually `/var/lib/quicnet/state.json`
-- a durable identity path, usually `/var/lib/quicnet/identity.json`
+- a durable state path, usually `~/.quip/quicnet/state.json`
+- a durable identity path, usually `~/.quip/quicnet/identity.json`
 - an injected `QUICNET_IDENTITY_PASSPHRASE` secret
 - an authority bootstrap source, usually `QUICNET_AUTHORITY_ORIGIN`
 

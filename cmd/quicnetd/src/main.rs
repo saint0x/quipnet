@@ -14,10 +14,10 @@ struct Args {
     #[arg(long, default_value = "personalcloud-prod")]
     network: String,
 
-    #[arg(long, default_value = "./var/quicnetd/state.json")]
+    #[arg(long, default_value = "~/.quip/quicnet/state.json")]
     state_path: String,
 
-    #[arg(long, default_value = "./var/quicnetd/identity.json")]
+    #[arg(long, default_value = "~/.quip/quicnet/identity.json")]
     identity_path: String,
 
     #[arg(long, default_value = "QUICNET_IDENTITY_PASSPHRASE")]
@@ -124,7 +124,8 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     observability::init_tracing("quicnetd");
-    let args = Args::parse();
+    let mut args = Args::parse();
+    normalize_args_paths(&mut args);
     let local_identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env)?;
     let transport = daemon_transport(&args, &local_identity)?;
     let control = LocalControlPlane::new(DaemonConfig::new(
@@ -578,6 +579,25 @@ fn load_or_init_identity(
     }
 }
 
+fn normalize_args_paths(args: &mut Args) {
+    args.state_path = expand_home_path(&args.state_path);
+    args.identity_path = expand_home_path(&args.identity_path);
+    args.authority_snapshot = args.authority_snapshot.as_ref().map(|path| expand_home_path(path));
+    args.network_change_trigger_path = args
+        .network_change_trigger_path
+        .as_ref()
+        .map(|path| expand_home_path(path));
+}
+
+fn expand_home_path(path: &str) -> String {
+    if let Some(suffix) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{suffix}");
+        }
+    }
+    path.to_string()
+}
+
 impl DaemonTriggerMonitor {
     fn new(args: &Args) -> Self {
         let state_path = PathBuf::from(&args.state_path);
@@ -783,5 +803,22 @@ mod tests {
             .expect("time should advance")
             .as_nanos();
         std::env::temp_dir().join(format!("{name}-{suffix}.tmp"))
+    }
+
+    #[test]
+    fn expand_home_path_uses_home_environment() {
+        let original = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", "/tmp/quip-home");
+        }
+
+        let expanded = super::expand_home_path("~/.quip/quicnet/identity.json");
+
+        match original {
+            Some(home) => unsafe { std::env::set_var("HOME", home) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert_eq!(expanded, "/tmp/quip-home/.quip/quicnet/identity.json");
     }
 }
