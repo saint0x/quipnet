@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use crypto::{IdentityKeypair, SessionKeypair};
@@ -7,8 +8,10 @@ use model::NetworkId;
 use rand::{rngs::OsRng, RngCore};
 use relay::{HttpRelayControl, RelayControl};
 use relaywire::RelayOpenRequest;
+use serde_json::json;
 use transport::{
-    BindSpec, ConnectionHandle, RelayPlan, RoutePlan, SecureTransport, SessionLifecycleTransport,
+    BindSpec, ConnectionHandle, RelayPlan, RoutePlan, RuntimeEvent, RuntimeEventSubject,
+    RuntimeSessionState, SecureTransport, SessionClosureReason, SessionLifecycleTransport,
     SessionSnapshot, TransportError,
 };
 
@@ -39,6 +42,7 @@ pub struct QuicTransportAdapter {
     pub local_identity: Option<IdentityKeypair>,
     relay_control: Arc<dyn RelayControl>,
     runtime_sessions: Arc<RwLock<BTreeMap<[u8; 16], RuntimeSessionRecord>>>,
+    runtime_events: Arc<RwLock<VecDeque<RuntimeEvent>>>,
 }
 
 impl Default for QuicTransportAdapter {
@@ -51,6 +55,7 @@ impl Default for QuicTransportAdapter {
             local_identity: None,
             relay_control: Arc::new(HttpRelayControl),
             runtime_sessions: Arc::new(RwLock::new(BTreeMap::new())),
+            runtime_events: Arc::new(RwLock::new(VecDeque::new())),
         }
     }
 }
@@ -128,11 +133,73 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .map(|record| record.snapshot.clone()))
     }
 
+    fn update_session_state(
+        &self,
+        session_id: &[u8; 16],
+        state: RuntimeSessionState,
+        closure_reason: Option<SessionClosureReason>,
+        state_reason: Option<String>,
+    ) -> Result<Option<SessionSnapshot>, TransportError> {
+        let mut sessions = self
+            .runtime_sessions
+            .write()
+            .expect("runtime session registry should remain writable");
+        let Some(record) = sessions.get_mut(session_id) else {
+            return Ok(None);
+        };
+        let prior_state = record.snapshot.state.clone();
+        record.snapshot.state = state.clone();
+        record.snapshot.closure_reason = closure_reason.clone();
+        record.snapshot.state_reason = state_reason.clone();
+        record.snapshot.last_activity_unix_secs = current_unix_secs();
+        let snapshot = record.snapshot.clone();
+        drop(sessions);
+        emit_runtime_event(
+            self,
+            runtime_event_type_for_state(&state).to_string(),
+            RuntimeEventSubject {
+                kind: "session".to_string(),
+                id: hex_session_id(&snapshot.session_id),
+            },
+            json!({
+                "peer_id": snapshot.peer.to_string(),
+                "prior_state": runtime_session_state_label(&prior_state),
+                "next_state": runtime_session_state_label(&snapshot.state),
+                "closure_reason": closure_reason.as_ref().map(session_closure_reason_label),
+                "reason": state_reason
+            }),
+        );
+        Ok(Some(snapshot))
+    }
+
+    fn recent_events(&self, limit: usize) -> Result<Vec<RuntimeEvent>, TransportError> {
+        let events = self
+            .runtime_events
+            .read()
+            .expect("runtime event buffer should remain readable");
+        let count = limit.max(1).min(events.len());
+        Ok(events
+            .iter()
+            .rev()
+            .take(count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect())
+    }
+
     async fn migrate(
         &self,
         session: &SessionSnapshot,
         route: RoutePlan,
     ) -> Result<SessionSnapshot, TransportError> {
+        let _ = self.update_session_state(
+            &session.session_id,
+            RuntimeSessionState::Migrating,
+            None,
+            Some("daemon requested path migration".to_string()),
+        )?;
         let existing = self.session_snapshot(&session.session_id)?.ok_or_else(|| {
             TransportError::InvalidRoute("session is not active in runtime registry".into())
         })?;
@@ -142,6 +209,8 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
         let previous_path_kind = existing.path_kind;
 
         migrated.session_id = existing.session_id;
+        migrated.created_at_unix_secs = existing.created_at_unix_secs;
+        migrated.last_activity_unix_secs = current_unix_secs();
 
         if previous_path_kind == model::PathKind::Relay
             && (migrated.path_kind != model::PathKind::Relay
@@ -162,10 +231,29 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 alpn_protocol: route.protocol.map(|id| id.as_str().to_string()),
             },
         )?;
+        emit_runtime_event(
+            self,
+            "path.migration_completed".to_string(),
+            RuntimeEventSubject {
+                kind: "session".to_string(),
+                id: hex_session_id(&migrated.session_id),
+            },
+            json!({
+                "peer_id": migrated.peer.to_string(),
+                "prior_path_class": path_class_label(previous_path_kind),
+                "next_path_class": path_class_label(migrated.path_kind)
+            }),
+        );
         Ok(migrated)
     }
 
     async fn close_session(&self, session: &SessionSnapshot) -> Result<(), TransportError> {
+        let _ = self.update_session_state(
+            &session.session_id,
+            RuntimeSessionState::Closing,
+            session.closure_reason.clone(),
+            session.state_reason.clone(),
+        )?;
         let Some(active) = remove_runtime_session(self, &session.session_id)? else {
             return Ok(());
         };
@@ -177,6 +265,21 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 session.transport_session_id,
             )?;
         }
+        emit_runtime_event(
+            self,
+            "session.closed".to_string(),
+            RuntimeEventSubject {
+                kind: "session".to_string(),
+                id: hex_session_id(&session.session_id),
+            },
+            json!({
+                "peer_id": session.peer.to_string(),
+                "prior_state": runtime_session_state_label(&RuntimeSessionState::Closing),
+                "next_state": runtime_session_state_label(&RuntimeSessionState::Closed),
+                "closure_reason": session.closure_reason.as_ref().map(session_closure_reason_label),
+                "reason": session.state_reason
+            }),
+        );
         Ok(())
     }
 }
@@ -214,6 +317,7 @@ fn direct_session_snapshot(
         .first()
         .cloned()
         .ok_or_else(|| TransportError::NoRoute(route.peer.clone()))?;
+    let now = current_unix_secs();
     Ok(SessionSnapshot {
         session_id: logical_session_id(route),
         transport_session_id: logical_session_id(route),
@@ -229,6 +333,11 @@ fn direct_session_snapshot(
         relay_control_endpoint: None,
         datagrams_capable: adapter.supports_datagrams,
         migration_capable: adapter.supports_path_migration,
+        state: RuntimeSessionState::Active,
+        closure_reason: None,
+        state_reason: None,
+        created_at_unix_secs: now,
+        last_activity_unix_secs: now,
     })
 }
 
@@ -289,6 +398,7 @@ fn relay_session_snapshot(
         .cloned()
         .or_else(|| route.remote_endpoints.first().cloned())
         .unwrap_or_else(|| route.peer.to_string());
+    let now = current_unix_secs();
     Ok(SessionSnapshot {
         session_id: logical_session_id(route),
         transport_session_id: accepted.session_id,
@@ -304,6 +414,11 @@ fn relay_session_snapshot(
         relay_control_endpoint: Some(relay.relay_control_endpoint.clone()),
         datagrams_capable: adapter.supports_datagrams && relay.supports_datagrams,
         migration_capable: adapter.supports_path_migration && relay.supports_path_migration,
+        state: RuntimeSessionState::Active,
+        closure_reason: None,
+        state_reason: None,
+        created_at_unix_secs: now,
+        last_activity_unix_secs: now,
     })
 }
 
@@ -331,11 +446,19 @@ fn upsert_runtime_session(
     adapter: &QuicTransportAdapter,
     record: RuntimeSessionRecord,
 ) -> Result<(), TransportError> {
+    let session_id = record.snapshot.session_id;
+    let event_details = json!({
+        "peer_id": record.snapshot.peer.to_string(),
+        "next_state": runtime_session_state_label(&record.snapshot.state),
+        "path_class": path_class_label(record.snapshot.path_kind)
+    });
     let mut sessions = adapter
         .runtime_sessions
         .write()
         .expect("runtime session registry should remain writable");
-    if let Some(previous) = sessions.insert(record.snapshot.session_id, record.clone()) {
+    let previous = sessions.insert(session_id, record.clone());
+    drop(sessions);
+    if let Some(previous) = previous {
         if previous.snapshot.path_kind == model::PathKind::Relay
             && (previous.snapshot.transport_session_id != record.snapshot.transport_session_id
                 || previous.snapshot.relay_control_endpoint
@@ -348,6 +471,43 @@ fn upsert_runtime_session(
                 previous.snapshot.transport_session_id,
             )?;
         }
+        emit_runtime_event(
+            adapter,
+            "session.state_changed".to_string(),
+            RuntimeEventSubject {
+                kind: "session".to_string(),
+                id: hex_session_id(&session_id),
+            },
+            json!({
+                "peer_id": record.snapshot.peer.to_string(),
+                "prior_state": runtime_session_state_label(&previous.snapshot.state),
+                "next_state": runtime_session_state_label(&record.snapshot.state),
+                "path_class": path_class_label(record.snapshot.path_kind)
+            }),
+        );
+    } else {
+        emit_runtime_event(
+            adapter,
+            "session.created".to_string(),
+            RuntimeEventSubject {
+                kind: "session".to_string(),
+                id: hex_session_id(&session_id),
+            },
+            event_details,
+        );
+        emit_runtime_event(
+            adapter,
+            "path.selected".to_string(),
+            RuntimeEventSubject {
+                kind: "session".to_string(),
+                id: hex_session_id(&session_id),
+            },
+            json!({
+                "peer_id": record.snapshot.peer.to_string(),
+                "path_class": path_class_label(record.snapshot.path_kind),
+                "source": format!("{:?}", record.snapshot.source)
+            }),
+        );
     }
     Ok(())
 }
@@ -374,6 +534,148 @@ fn close_relay_transport_session(
     relay_control
         .close_session(endpoint, transport_session_id, "path migrated".into())
         .map_err(|error| TransportError::RelayRejected(error.to_string()))
+}
+
+fn emit_runtime_event(
+    adapter: &QuicTransportAdapter,
+    event_type: String,
+    subject: RuntimeEventSubject,
+    details: serde_json::Value,
+) {
+    let mut events = adapter
+        .runtime_events
+        .write()
+        .expect("runtime event buffer should remain writable");
+    events.push_back(RuntimeEvent {
+        event_id: format!("evt-{}", current_unix_nanos()),
+        event_type,
+        emitted_at: current_rfc3339(),
+        truth_kind: "runtime".to_string(),
+        subject,
+        details,
+    });
+    while events.len() > 256 {
+        events.pop_front();
+    }
+}
+
+fn runtime_event_type_for_state(state: &RuntimeSessionState) -> &'static str {
+    match state {
+        RuntimeSessionState::Closing => "session.closing",
+        RuntimeSessionState::Failed => "session.failed",
+        _ => "session.state_changed",
+    }
+}
+
+fn runtime_session_state_label(state: &RuntimeSessionState) -> &'static str {
+    match state {
+        RuntimeSessionState::Pending => "pending",
+        RuntimeSessionState::Connecting => "connecting",
+        RuntimeSessionState::Active => "active",
+        RuntimeSessionState::Degraded => "degraded",
+        RuntimeSessionState::Migrating => "migrating",
+        RuntimeSessionState::Reconciling => "reconciling",
+        RuntimeSessionState::Closing => "closing",
+        RuntimeSessionState::Closed => "closed",
+        RuntimeSessionState::Failed => "failed",
+    }
+}
+
+fn session_closure_reason_label(reason: &SessionClosureReason) -> &'static str {
+    match reason {
+        SessionClosureReason::OperatorRequested => "operator_requested",
+        SessionClosureReason::LocalRuntimeFailure => "local_runtime_failure",
+        SessionClosureReason::RemoteFailure => "remote_failure",
+        SessionClosureReason::PolicyRejected => "policy_rejected",
+        SessionClosureReason::PathExhaustion => "path_exhaustion",
+        SessionClosureReason::DaemonShutdown => "daemon_shutdown",
+    }
+}
+
+fn path_class_label(path_kind: model::PathKind) -> &'static str {
+    match path_kind {
+        model::PathKind::Relay => "relay",
+        _ => "direct",
+    }
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_secs()
+}
+
+fn current_unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_nanos()
+}
+
+fn current_rfc3339() -> String {
+    format!("{}Z", iso8601_seconds(current_unix_secs()))
+}
+
+fn hex_session_id(session_id: &[u8; 16]) -> String {
+    session_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn iso8601_seconds(epoch_secs: u64) -> String {
+    let datetime = chrono_like::DateTime::from_unix(epoch_secs as i64);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        datetime.year,
+        datetime.month,
+        datetime.day,
+        datetime.hour,
+        datetime.minute,
+        datetime.second
+    )
+}
+
+mod chrono_like {
+    pub struct DateTime {
+        pub year: i32,
+        pub month: u32,
+        pub day: u32,
+        pub hour: u32,
+        pub minute: u32,
+        pub second: u32,
+    }
+
+    impl DateTime {
+        pub fn from_unix(epoch_secs: i64) -> Self {
+            let days = epoch_secs.div_euclid(86_400);
+            let seconds = epoch_secs.rem_euclid(86_400);
+            let (year, month, day) = civil_from_days(days);
+            Self {
+                year,
+                month,
+                day,
+                hour: (seconds / 3_600) as u32,
+                minute: ((seconds % 3_600) / 60) as u32,
+                second: (seconds % 60) as u32,
+            }
+        }
+    }
+
+    fn civil_from_days(days: i64) -> (i32, u32, u32) {
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = mp + if mp < 10 { 3 } else { -9 };
+        let year = y + if m <= 2 { 1 } else { 0 };
+        (year as i32, m as u32, d as u32)
+    }
 }
 
 trait RoutePlanExt {
@@ -436,6 +738,7 @@ mod tests {
         assert_eq!(handle.session.peer, peer);
         assert!(handle.session.migration_capable);
         assert!(handle.session.relay_peer.is_none());
+        assert_eq!(handle.session.state, RuntimeSessionState::Active);
         assert!(adapter.owns_session(&handle.session.session_id));
     }
 
@@ -539,6 +842,51 @@ mod tests {
             Some("quic://203.0.113.70:443")
         );
         assert!(handle.session.relay_attempt_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn adapter_records_runtime_events_and_state_transitions() {
+        let local_identity = IdentityKeypair::from_secret_bytes([90_u8; 32]);
+        let local = local_identity.peer_id();
+        let adapter =
+            QuicTransportAdapter::with_identity(NetworkId::derive("events-test"), local_identity);
+        let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer-events");
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let handle = adapter
+            .connect(RoutePlan {
+                local_peer: local,
+                peer,
+                protocol: Some(protocol),
+                class: TrafficClass::Interactive,
+                path_kind: PathKind::DirectUdp,
+                source: RouteSource::Observed,
+                remote_endpoints: vec!["quic://198.51.100.10:8443".to_string()],
+                relay: None,
+            })
+            .await
+            .unwrap();
+
+        let updated = adapter
+            .update_session_state(
+                &handle.session.session_id,
+                RuntimeSessionState::Reconciling,
+                None,
+                Some("daemon reconcile cycle".to_string()),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(updated.state, RuntimeSessionState::Reconciling);
+        let events = adapter.recent_events(8).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "session.created"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "path.selected"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "session.state_changed"));
     }
 
     #[tokio::test]
@@ -757,6 +1105,11 @@ mod tests {
             relay_control_endpoint: None,
             datagrams_capable: true,
             migration_capable: true,
+            state: RuntimeSessionState::Active,
+            closure_reason: None,
+            state_reason: None,
+            created_at_unix_secs: current_unix_secs(),
+            last_activity_unix_secs: current_unix_secs(),
         };
 
         let error = adapter

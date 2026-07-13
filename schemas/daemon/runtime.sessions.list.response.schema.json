@@ -43,6 +43,22 @@
                       "failed"
                     ]
                   },
+                  "closure_reason": {
+                    "type": ["string", "null"],
+                    "enum": [
+                      "operator_requested",
+                      "local_runtime_failure",
+                      "remote_failure",
+                      "policy_rejected",
+                      "path_exhaustion",
+                      "daemon_shutdown",
+                      null
+                    ]
+                  },
+                  "state_reason": {
+                    "type": ["string", "null"],
+                    "minLength": 1
+                  },
                   "active_path_class": {
                     "type": "string",
                     "enum": ["direct", "relay", "unknown"]

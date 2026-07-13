@@ -140,9 +140,27 @@ pub struct RuntimeSessionEntry {
     pub session_id: String,
     pub peer_id: String,
     pub state: String,
+    pub closure_reason: Option<String>,
+    pub state_reason: Option<String>,
     pub active_path_class: String,
     pub age_seconds: u64,
     pub last_activity_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEventsListResult {
+    pub truth_kind: String,
+    pub events: Vec<RuntimeEventEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEventEntry {
+    pub event_id: String,
+    pub event_type: String,
+    pub emitted_at: String,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub details: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,6 +184,7 @@ pub struct SessionConnectSummary {
     pub session_id: String,
     pub state: String,
     pub initial_path_class: String,
+    pub state_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

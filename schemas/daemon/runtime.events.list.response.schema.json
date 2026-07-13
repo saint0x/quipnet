@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/runtime.events.list.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["truth_kind", "events"],
+          "properties": {
+            "truth_kind": { "const": "runtime" },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "event_id",
+                  "event_type",
+                  "emitted_at",
+                  "subject_kind",
+                  "subject_id",
+                  "details"
+                ],
+                "properties": {
+                  "event_id": { "type": "string", "minLength": 1 },
+                  "event_type": { "type": "string", "minLength": 1 },
+                  "emitted_at": { "type": "string", "format": "date-time" },
+                  "subject_kind": {
+                    "type": "string",
+                    "enum": ["session", "peer", "authority", "path", "runtime"]
+                  },
+                  "subject_id": { "type": "string", "minLength": 1 },
+                  "details": { "type": "object" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

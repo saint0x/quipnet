@@ -21,6 +21,10 @@
                   "type": "string",
                   "enum": ["pending", "connecting", "active", "degraded", "failed"]
                 },
+                "state_reason": {
+                  "type": ["string", "null"],
+                  "minLength": 1
+                },
                 "initial_path_class": {
                   "type": "string",
                   "enum": ["direct", "relay", "unknown"]

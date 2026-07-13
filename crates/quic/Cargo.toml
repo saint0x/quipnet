@@ -16,5 +16,6 @@ model = { path = "../model" }
 rand.workspace = true
 relay = { path = "../relay" }
 relaywire = { path = "../relaywire" }
+serde_json.workspace = true
 transport = { path = "../transport" }
 tokio.workspace = true

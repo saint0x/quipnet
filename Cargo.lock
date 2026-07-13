@@ -1001,6 +1001,7 @@ dependencies = [
  "rand",
  "relay",
  "relaywire",
+ "serde_json",
  "tokio",
  "transport",
 ]
@@ -1556,6 +1557,7 @@ dependencies = [
  "model",
  "records",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

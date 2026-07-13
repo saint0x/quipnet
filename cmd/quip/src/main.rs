@@ -2,9 +2,9 @@ use clap::{Parser, Subcommand};
 use crypto::IdentityKeypair;
 use daemonapi::{
     AuthKind, DaemonEndpointDiscovery, RequestAuth, RequestEnvelope, ResponseEnvelope,
-    RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
-    SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
-    SessionUpgradePayload, SessionUpgradeResult,
+    RuntimeEventsListResult, RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload,
+    SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionReconcilePayload,
+    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
 use fabric::PathCandidate;
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
@@ -126,6 +126,10 @@ enum PathCommand {
 #[derive(Subcommand, Debug)]
 enum RuntimeCommand {
     Sessions,
+    Events {
+        #[arg(long, default_value_t = 32)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -327,14 +331,39 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     for session in sessions.sessions {
                         println!(
-                            "session_id={} peer={} state={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
+                            "session_id={} peer={} state={} closure_reason={} state_reason={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
                             session.session_id,
                             session.peer_id,
                             session.state,
+                            session.closure_reason.as_deref().unwrap_or("none"),
+                            session.state_reason.as_deref().unwrap_or("none"),
                             session.active_path_class,
                             session.age_seconds,
                             session.last_activity_seconds,
                             sessions.truth_kind
+                        );
+                    }
+                }
+            }
+            RuntimeCommand::Events { limit } => {
+                let events = daemon_request::<RuntimeEventsListResult>(
+                    &cli,
+                    "runtime.events.list",
+                    json!({ "limit": limit }),
+                )?;
+                if events.events.is_empty() {
+                    println!("truth_kind={} events=0", events.truth_kind);
+                } else {
+                    for event in events.events {
+                        println!(
+                            "event_id={} event_type={} emitted_at={} subject_kind={} subject_id={} details={} truth_kind={}",
+                            event.event_id,
+                            event.event_type,
+                            event.emitted_at,
+                            event.subject_kind,
+                            event.subject_id,
+                            serde_json::to_string(&event.details)?,
+                            events.truth_kind
                         );
                     }
                 }
@@ -352,10 +381,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     for session in sessions.sessions {
                         println!(
-                            "session_id={} peer={} state={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
+                            "session_id={} peer={} state={} closure_reason={} state_reason={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
                             session.session_id,
                             session.peer_id,
                             session.state,
+                            session.closure_reason.as_deref().unwrap_or("none"),
+                            session.state_reason.as_deref().unwrap_or("none"),
                             session.active_path_class,
                             session.age_seconds,
                             session.last_activity_seconds,
@@ -383,9 +414,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     })?,
                 )?;
                 println!(
-                    "session_id={} state={} path={} truth_kind={}",
+                    "session_id={} state={} state_reason={} path={} truth_kind={}",
                     result.session.session_id,
                     result.session.state,
+                    result.session.state_reason.as_deref().unwrap_or("none"),
                     result.session.initial_path_class,
                     result.truth_kind
                 );
@@ -519,9 +551,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 })?,
             )?;
             println!(
-                "session_id={} state={} path={} truth_kind={}",
+                "session_id={} state={} state_reason={} path={} truth_kind={}",
                 result.session.session_id,
                 result.session.state,
+                result.session.state_reason.as_deref().unwrap_or("none"),
                 result.session.initial_path_class,
                 result.truth_kind
             );
@@ -537,10 +570,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
             } else {
                 for session in sessions.sessions {
                     println!(
-                        "session_id={} peer={} state={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
+                        "session_id={} peer={} state={} closure_reason={} state_reason={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
                         session.session_id,
                         session.peer_id,
                         session.state,
+                        session.closure_reason.as_deref().unwrap_or("none"),
+                        session.state_reason.as_deref().unwrap_or("none"),
                         session.active_path_class,
                         session.age_seconds,
                         session.last_activity_seconds,

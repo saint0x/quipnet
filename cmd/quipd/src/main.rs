@@ -7,11 +7,11 @@ use clap::Parser;
 use crypto::IdentityKeypair;
 use daemonapi::{
     AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus, ErrorCode, IdentityStatus,
-    RequestEnvelope, ResponseEnvelope, RuntimeSessionEntry, RuntimeSessionsListResult,
-    RuntimeStatusResult, RuntimeSummary, SessionClosePayload, SessionCloseResult,
-    SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
-    SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
-    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
+    RequestEnvelope, ResponseEnvelope, RuntimeEventEntry, RuntimeEventsListResult,
+    RuntimeSessionEntry, RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary,
+    SessionClosePayload, SessionCloseResult, SessionConnectPayload, SessionConnectResult,
+    SessionConnectSummary, SessionReconcileEntry as ApiSessionReconcileEntry,
+    SessionReconcilePayload, SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
 use fabric::{DaemonConfig, LocalControlPlane, ProtocolId, SessionSnapshot, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
@@ -617,6 +617,7 @@ fn route_control_request(
             runtime_status_response(args, control, transport, local_identity, envelope)
         }
         "runtime.sessions.list" => runtime_sessions_response(control, transport, envelope),
+        "runtime.events.list" => runtime_events_response(control, transport, envelope),
         "session.connect" => runtime.block_on(session_connect_response(
             control,
             transport,
@@ -748,6 +749,38 @@ fn runtime_sessions_response(
     }
 }
 
+fn runtime_events_response(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let limit = envelope
+        .payload
+        .get("limit")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(32) as usize;
+    match control.runtime_events(transport, limit) {
+        Ok(events) => ResponseEnvelope::success(
+            envelope.request_id,
+            RuntimeEventsListResult {
+                truth_kind: "runtime".to_string(),
+                events: events
+                    .into_iter()
+                    .map(|event| RuntimeEventEntry {
+                        event_id: event.event_id,
+                        event_type: event.event_type,
+                        emitted_at: event.emitted_at,
+                        subject_kind: event.subject.kind,
+                        subject_id: event.subject.id,
+                        details: event.details,
+                    })
+                    .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
 async fn session_connect_response(
     control: &LocalControlPlane,
     transport: &QuicTransportAdapter,
@@ -806,8 +839,9 @@ async fn session_connect_response(
                 truth_kind: "runtime".to_string(),
                 session: SessionConnectSummary {
                     session_id: hex_session_id(&session.session_id),
-                    state: "active".to_string(),
+                    state: runtime_state_label(&session.state).to_string(),
                     initial_path_class: path_class_label(session.path_kind).to_string(),
+                    state_reason: session.state_reason.clone(),
                 },
             },
         ),
@@ -914,7 +948,7 @@ async fn session_upgrade_response(
                 session_id: payload.session_id,
                 prior_path_class: path_class_label(prior.path_kind).to_string(),
                 resulting_path_class: path_class_label(session.path_kind).to_string(),
-                state: "active".to_string(),
+                state: runtime_state_label(&session.state).to_string(),
             },
         ),
         Err(error) => daemon_error_response(envelope.request_id, &error),
@@ -969,13 +1003,16 @@ async fn session_reconcile_response(
 }
 
 fn runtime_session_entry(session: &SessionSnapshot) -> RuntimeSessionEntry {
+    let now = current_unix_secs();
     RuntimeSessionEntry {
         session_id: hex_session_id(&session.session_id),
         peer_id: session.peer.to_string(),
-        state: "active".to_string(),
+        state: runtime_state_label(&session.state).to_string(),
+        closure_reason: session.closure_reason.as_ref().map(closure_reason_label),
+        state_reason: session.state_reason.clone(),
         active_path_class: path_class_label(session.path_kind).to_string(),
-        age_seconds: 0,
-        last_activity_seconds: 0,
+        age_seconds: now.saturating_sub(session.created_at_unix_secs),
+        last_activity_seconds: now.saturating_sub(session.last_activity_unix_secs),
     }
 }
 
@@ -1046,6 +1083,31 @@ fn path_class_label(path_kind: fabric::PathKind) -> &'static str {
     match path_kind {
         fabric::PathKind::Relay => "relay",
         _ => "direct",
+    }
+}
+
+fn runtime_state_label(state: &fabric::RuntimeSessionState) -> &'static str {
+    match state {
+        fabric::RuntimeSessionState::Pending => "pending",
+        fabric::RuntimeSessionState::Connecting => "connecting",
+        fabric::RuntimeSessionState::Active => "active",
+        fabric::RuntimeSessionState::Degraded => "degraded",
+        fabric::RuntimeSessionState::Migrating => "migrating",
+        fabric::RuntimeSessionState::Reconciling => "reconciling",
+        fabric::RuntimeSessionState::Closing => "closing",
+        fabric::RuntimeSessionState::Closed => "closed",
+        fabric::RuntimeSessionState::Failed => "failed",
+    }
+}
+
+fn closure_reason_label(reason: &fabric::SessionClosureReason) -> String {
+    match reason {
+        fabric::SessionClosureReason::OperatorRequested => "operator_requested".to_string(),
+        fabric::SessionClosureReason::LocalRuntimeFailure => "local_runtime_failure".to_string(),
+        fabric::SessionClosureReason::RemoteFailure => "remote_failure".to_string(),
+        fabric::SessionClosureReason::PolicyRejected => "policy_rejected".to_string(),
+        fabric::SessionClosureReason::PathExhaustion => "path_exhaustion".to_string(),
+        fabric::SessionClosureReason::DaemonShutdown => "daemon_shutdown".to_string(),
     }
 }
 

@@ -1061,6 +1061,12 @@ impl LocalControlPlane {
         let session = transport
             .session_snapshot(session_id)?
             .ok_or_else(|| DaemonStateError::SessionNotFound(hex_session_id(session_id)))?;
+        let _ = transport.update_session_state(
+            session_id,
+            RuntimeSessionState::Closing,
+            Some(SessionClosureReason::OperatorRequested),
+            Some("operator requested close".to_string()),
+        )?;
         transport.close_session(&session).await?;
         state.active_sessions = transport.active_sessions()?;
         state.save(&self.config.state_path)?;
@@ -1084,8 +1090,20 @@ impl LocalControlPlane {
         })?;
         let policy = state.explain_policy(&session.peer, &protocol);
         if !policy.allowed {
+            let _ = transport.update_session_state(
+                session_id,
+                RuntimeSessionState::Failed,
+                Some(SessionClosureReason::PolicyRejected),
+                Some(policy.reason.clone()),
+            )?;
             return Err(DaemonStateError::PolicyDenied(policy.reason));
         }
+        let _ = transport.update_session_state(
+            session_id,
+            RuntimeSessionState::Migrating,
+            None,
+            Some("daemon selected a better path".to_string()),
+        )?;
         let route = state.route_plan(&session.peer, Some(protocol), session.class)?;
         let upgraded = transport.migrate(&session, route).await?;
         let mut state = state.with_active_session(upgraded.clone());
@@ -1109,6 +1127,12 @@ impl LocalControlPlane {
         let mut closed = 0;
 
         for session in sessions {
+            let _ = transport.update_session_state(
+                &session.session_id,
+                RuntimeSessionState::Reconciling,
+                None,
+                Some("daemon reconcile cycle".to_string()),
+            )?;
             let Some(session) = transport.session_snapshot(&session.session_id)? else {
                 state = state.without_session(&session.session_id);
                 closed += 1;
@@ -1122,6 +1146,12 @@ impl LocalControlPlane {
                 continue;
             };
             let Some(protocol) = session.protocol.clone() else {
+                let _ = transport.update_session_state(
+                    &session.session_id,
+                    RuntimeSessionState::Closing,
+                    Some(SessionClosureReason::LocalRuntimeFailure),
+                    Some("session is missing negotiated protocol".to_string()),
+                )?;
                 transport.close_session(&session).await?;
                 state = state.without_session(&session.session_id);
                 closed += 1;
@@ -1137,6 +1167,12 @@ impl LocalControlPlane {
 
             let policy = state.explain_policy(&session.peer, &protocol);
             if !policy.allowed {
+                let _ = transport.update_session_state(
+                    &session.session_id,
+                    RuntimeSessionState::Closing,
+                    Some(SessionClosureReason::PolicyRejected),
+                    Some(policy.reason.clone()),
+                )?;
                 transport.close_session(&session).await?;
                 state = state.without_session(&session.session_id);
                 closed += 1;
@@ -1154,6 +1190,12 @@ impl LocalControlPlane {
             {
                 Ok(route) => route,
                 Err(DaemonStateError::NoRoute(_)) => {
+                    let _ = transport.update_session_state(
+                        &session.session_id,
+                        RuntimeSessionState::Closing,
+                        Some(SessionClosureReason::PathExhaustion),
+                        Some("no route is available for session".to_string()),
+                    )?;
                     transport.close_session(&session).await?;
                     state = state.without_session(&session.session_id);
                     closed += 1;
@@ -1170,6 +1212,12 @@ impl LocalControlPlane {
             };
 
             if session_matches_route(&session, &route) {
+                let _ = transport.update_session_state(
+                    &session.session_id,
+                    RuntimeSessionState::Active,
+                    None,
+                    Some("selected path still matches active session".to_string()),
+                )?;
                 unchanged += 1;
                 entries.push(SessionReconcileEntry {
                     session_id: session.session_id,
@@ -1182,6 +1230,12 @@ impl LocalControlPlane {
             }
 
             let next_path_kind = route.path_kind;
+            let _ = transport.update_session_state(
+                &session.session_id,
+                RuntimeSessionState::Migrating,
+                None,
+                Some("selected path changed; session migrating".to_string()),
+            )?;
             let migrated = transport.migrate(&session, route).await?;
             state = state.with_active_session(migrated);
             upgraded += 1;
@@ -1227,6 +1281,17 @@ impl LocalControlPlane {
         state.active_sessions = transport.active_sessions()?;
         state.save(&self.config.state_path)?;
         Ok(session)
+    }
+
+    pub fn runtime_events<T>(
+        &self,
+        transport: &T,
+        limit: usize,
+    ) -> Result<Vec<RuntimeEvent>, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        transport.recent_events(limit).map_err(Into::into)
     }
 
     pub fn explain_policy(

@@ -3,6 +3,7 @@ use bytes::Bytes;
 use model::{ContentId, PathKind, PathStats, PeerId, PeerView, ProtocolId, TrafficClass};
 use records::SignedRecord;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -82,6 +83,52 @@ pub struct SessionSnapshot {
     pub relay_control_endpoint: Option<String>,
     pub datagrams_capable: bool,
     pub migration_capable: bool,
+    pub state: RuntimeSessionState,
+    pub closure_reason: Option<SessionClosureReason>,
+    pub state_reason: Option<String>,
+    pub created_at_unix_secs: u64,
+    pub last_activity_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSessionState {
+    Pending,
+    Connecting,
+    Active,
+    Degraded,
+    Migrating,
+    Reconciling,
+    Closing,
+    Closed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionClosureReason {
+    OperatorRequested,
+    LocalRuntimeFailure,
+    RemoteFailure,
+    PolicyRejected,
+    PathExhaustion,
+    DaemonShutdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEvent {
+    pub event_id: String,
+    pub event_type: String,
+    pub emitted_at: String,
+    pub truth_kind: String,
+    pub subject: RuntimeEventSubject,
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeEventSubject {
+    pub kind: String,
+    pub id: String,
 }
 
 pub trait ConnectionHandle {
@@ -105,6 +152,16 @@ pub trait SessionLifecycleTransport: SecureTransport {
         &self,
         session_id: &[u8; 16],
     ) -> Result<Option<SessionSnapshot>, TransportError>;
+
+    fn update_session_state(
+        &self,
+        session_id: &[u8; 16],
+        state: RuntimeSessionState,
+        closure_reason: Option<SessionClosureReason>,
+        state_reason: Option<String>,
+    ) -> Result<Option<SessionSnapshot>, TransportError>;
+
+    fn recent_events(&self, limit: usize) -> Result<Vec<RuntimeEvent>, TransportError>;
 
     async fn migrate(
         &self,

@@ -6,7 +6,8 @@
     "session": {
       "session_id": "sess-0100",
       "state": "connecting",
-      "initial_path_class": "direct"
+      "initial_path_class": "direct",
+      "state_reason": "transport establishment in progress"
     }
   },
   "error": null
