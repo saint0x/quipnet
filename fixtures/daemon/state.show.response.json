@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "request_id": "req-state-show",
+  "result": {
+    "truth_kind": "durable",
+    "state_path": "/Users/example/.quip/net/state.json",
+    "present": true,
+    "schema_version": 1,
+    "valid": true,
+    "violations": [],
+    "summary": {
+      "network": "personalcloud-prod",
+      "local_peer_id": "peer-local-001",
+      "roles": ["edge", "observer"],
+      "bootstrap_hints": 2,
+      "relays": 1,
+      "peers": 2,
+      "capability_grants": 1,
+      "revocations": 0,
+      "denied_peers": 0,
+      "path_candidates": 3
+    }
+  },
+  "error": null
+}

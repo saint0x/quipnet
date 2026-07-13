@@ -1,29 +1,32 @@
 {
   "schema_version": 99,
-  "network": {
-    "id": "personalcloud-prod",
-    "authority": {
-      "origin": "https://authority.quip.example"
-    }
+  "network": "personalcloud-prod",
+  "local_peer_id": "peer-local-001",
+  "roles": ["Edge", "Observer"],
+  "membership": {
+    "network_id": "personalcloud-prod",
+    "subject_peer_id": "peer-local-001",
+    "issuer_peer_id": "peer-authority-001",
+    "issued_at": 1720000000,
+    "expires_at": 1820000000,
+    "roles": ["member"],
+    "signature": []
   },
-  "authority_state": {
-    "last_accepted_revision": "rev-0042",
-    "last_sync_at": "2026-07-13T15:04:05Z",
-    "membership": {
-      "local_node_status": "active",
-      "accepted_groups": ["core"]
-    },
-    "capabilities": {
-      "local": ["connect"]
-    },
-    "revocations": {
-      "known_revisions": ["rev-0040"]
-    }
+  "capability_grants": [],
+  "revocations": [],
+  "denied_peers": [],
+  "bootstrap": [],
+  "relay_map": null,
+  "peers": [],
+  "netcheck": {
+    "nat_type": "Unknown",
+    "udp_reachable": false,
+    "ipv6_reachable": false,
+    "hairpin_supported": false,
+    "public_udp_addr": null,
+    "port_mapped": false,
+    "probe_observations": []
   },
-  "peers": {},
-  "path_history": {},
-  "recovery": {
-    "last_clean_checkpoint_at": "2026-07-13T15:00:00Z",
-    "integrity_state": "clean"
-  }
+  "queue_policies": [],
+  "path_candidates": []
 }

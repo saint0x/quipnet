@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/state.show.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "truth_kind",
+            "state_path",
+            "present",
+            "schema_version",
+            "valid",
+            "violations",
+            "summary"
+          ],
+          "properties": {
+            "truth_kind": { "const": "durable" },
+            "state_path": { "type": "string", "minLength": 1 },
+            "present": { "type": "boolean" },
+            "schema_version": {
+              "type": ["integer", "null"],
+              "minimum": 1
+            },
+            "valid": { "type": "boolean" },
+            "violations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "message"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "message": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "summary": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": [
+                "network",
+                "local_peer_id",
+                "roles",
+                "bootstrap_hints",
+                "relays",
+                "peers",
+                "capability_grants",
+                "revocations",
+                "denied_peers",
+                "path_candidates"
+              ],
+              "properties": {
+                "network": { "type": "string", "minLength": 1 },
+                "local_peer_id": { "type": "string", "minLength": 1 },
+                "roles": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "bootstrap_hints": { "type": "integer", "minimum": 0 },
+                "relays": { "type": "integer", "minimum": 0 },
+                "peers": { "type": "integer", "minimum": 0 },
+                "capability_grants": { "type": "integer", "minimum": 0 },
+                "revocations": { "type": "integer", "minimum": 0 },
+                "denied_peers": { "type": "integer", "minimum": 0 },
+                "path_candidates": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

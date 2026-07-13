@@ -209,6 +209,38 @@ Response:
 }
 ```
 
+## `state.show`
+
+Response:
+
+```json
+{
+  "ok": true,
+  "request_id": "req-3999",
+  "result": {
+    "truth_kind": "durable",
+    "state_path": "/Users/example/.quip/net/state.json",
+    "present": true,
+    "schema_version": 1,
+    "valid": true,
+    "violations": [],
+    "summary": {
+      "network": "personalcloud-prod",
+      "local_peer_id": "peer-local-001",
+      "roles": ["edge", "observer"],
+      "bootstrap_hints": 2,
+      "relays": 1,
+      "peers": 2,
+      "capability_grants": 1,
+      "revocations": 0,
+      "denied_peers": 0,
+      "path_candidates": 3
+    }
+  },
+  "error": null
+}
+```
+
 ## `state.validate`
 
 Response:
@@ -219,6 +251,8 @@ Response:
   "request_id": "req-4000",
   "result": {
     "truth_kind": "durable",
+    "state_path": "/Users/example/.quip/net/state.json",
+    "present": true,
     "schema_version": 1,
     "valid": true,
     "violations": []
@@ -255,7 +289,7 @@ Response:
     "truth_kind": "durable",
     "identity_preserved": true,
     "network_state_reset": true,
-    "next_action": "bootstrap_required"
+    "next_action": "daemon_restart_required"
   },
   "error": null
 }

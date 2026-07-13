@@ -134,6 +134,61 @@ pub struct IdentityVerifyResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableStateViolationEntry {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableStateSummaryResult {
+    pub network: String,
+    pub local_peer_id: String,
+    pub roles: Vec<String>,
+    pub bootstrap_hints: usize,
+    pub relays: usize,
+    pub peers: usize,
+    pub capability_grants: usize,
+    pub revocations: usize,
+    pub denied_peers: usize,
+    pub path_candidates: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateShowResult {
+    pub truth_kind: String,
+    pub state_path: String,
+    pub present: bool,
+    pub schema_version: Option<u64>,
+    pub valid: bool,
+    pub violations: Vec<DurableStateViolationEntry>,
+    pub summary: Option<DurableStateSummaryResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateValidateResult {
+    pub truth_kind: String,
+    pub state_path: String,
+    pub present: bool,
+    pub schema_version: Option<u64>,
+    pub valid: bool,
+    pub violations: Vec<DurableStateViolationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateResetPayload {
+    pub scope: String,
+    pub confirmation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateResetResult {
+    pub truth_kind: String,
+    pub identity_preserved: bool,
+    pub network_state_reset: bool,
+    pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DurableStateStatus {
     pub status: String,
     pub path: String,
@@ -509,6 +564,24 @@ mod tests {
         .expect("identity verify fixture should deserialize");
         assert!(identity_verify.ok);
 
+        let state_show: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/state.show.response.json"
+        ))
+        .expect("state show fixture should deserialize");
+        assert!(state_show.ok);
+
+        let state_validate: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/state.validate.response.json"
+        ))
+        .expect("state validate fixture should deserialize");
+        assert!(state_validate.ok);
+
+        let state_reset: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/state.reset.response.json"
+        ))
+        .expect("state reset fixture should deserialize");
+        assert!(state_reset.ok);
+
         let listener_schema: Value = serde_json::from_str(include_str!(
             "../../../schemas/daemon/runtime.listeners.list.response.schema.json"
         ))
@@ -537,6 +610,36 @@ mod tests {
                 ["properties"]
                 .get("decision_reason")
                 .is_some()
+        );
+
+        let state_show_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/state.show.response.schema.json"
+        ))
+        .expect("state show schema should parse");
+        assert_eq!(
+            state_show_schema["allOf"][1]["properties"]["result"]["properties"]["truth_kind"]
+                ["const"],
+            serde_json::json!("durable")
+        );
+
+        let state_validate_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/state.validate.response.schema.json"
+        ))
+        .expect("state validate schema should parse");
+        assert_eq!(
+            state_validate_schema["allOf"][1]["properties"]["result"]["properties"]["state_path"]
+                ["type"],
+            serde_json::json!("string")
+        );
+
+        let state_reset_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/state.reset.response.schema.json"
+        ))
+        .expect("state reset schema should parse");
+        assert_eq!(
+            state_reset_schema["allOf"][1]["properties"]["result"]["properties"]
+                ["network_state_reset"]["type"],
+            serde_json::json!("boolean")
         );
     }
 }

@@ -10,14 +10,15 @@ use daemonapi::{
     AuthorityRevocationEntry, AuthorityRevocationsResult, AuthorityShowResult,
     AuthoritySyncOriginPayload, AuthoritySyncResult, AuthoritySyncRevocationsOriginPayload,
     AuthoritySyncSnapshotPayload, AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus,
-    ErrorCode, IdentityShowResult, IdentityStatus, IdentityVerifyResult, RequestEnvelope,
-    ResponseEnvelope, RuntimeEventEntry, RuntimeEventsListResult, RuntimeHealthResult,
-    RuntimeListenerEntry, RuntimeListenersListResult, RuntimePathAlternativeEntry,
-    RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry, RuntimeSessionsListResult,
-    RuntimeStatusResult, RuntimeSummary, SessionClosePayload, SessionCloseResult,
-    SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
+    DurableStateSummaryResult, DurableStateViolationEntry, ErrorCode, IdentityShowResult,
+    IdentityStatus, IdentityVerifyResult, RequestEnvelope, ResponseEnvelope, RuntimeEventEntry,
+    RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
+    RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry,
+    RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary, SessionClosePayload,
+    SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
     SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
-    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
+    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult, StateResetPayload,
+    StateResetResult, StateShowResult, StateValidateResult,
 };
 use fabric::SessionLifecycleTransport;
 use fabric::{
@@ -770,6 +771,9 @@ fn route_control_request(
         "authority.revocations" => authority_revocations_response(control, envelope),
         "identity.show" => identity_show_response(args, control, local_identity, envelope),
         "identity.verify" => identity_verify_response(args, control, local_identity, envelope),
+        "state.show" => state_show_response(args, control, envelope),
+        "state.validate" => state_validate_response(args, control, envelope),
+        "state.reset" => state_reset_response(control, envelope),
         "authority.sync_snapshot" => runtime.block_on(authority_sync_snapshot_response(
             args,
             control,
@@ -1065,6 +1069,131 @@ fn identity_verify_response(
                 },
             )
         }
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn durable_state_violation_entry(
+    violation: fabric::DurableStateViolation,
+) -> DurableStateViolationEntry {
+    DurableStateViolationEntry {
+        path: violation.path,
+        message: violation.message,
+    }
+}
+
+fn durable_state_summary_result(summary: fabric::DurableStateSummary) -> DurableStateSummaryResult {
+    DurableStateSummaryResult {
+        network: summary.network,
+        local_peer_id: summary.local_peer_id.to_string(),
+        roles: summary
+            .roles
+            .into_iter()
+            .map(|role| format!("{role:?}").to_lowercase())
+            .collect(),
+        bootstrap_hints: summary.bootstrap_hints,
+        relays: summary.relays,
+        peers: summary.peers,
+        capability_grants: summary.capability_grants,
+        revocations: summary.revocations,
+        denied_peers: summary.denied_peers,
+        path_candidates: summary.path_candidates,
+    }
+}
+
+fn state_show_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.inspect_state_file() {
+        Ok(report) => ResponseEnvelope::success(
+            envelope.request_id,
+            StateShowResult {
+                truth_kind: "durable".to_string(),
+                state_path: args.state_path.clone(),
+                present: report.present,
+                schema_version: report.schema_version,
+                valid: report.valid,
+                violations: report
+                    .violations
+                    .into_iter()
+                    .map(durable_state_violation_entry)
+                    .collect(),
+                summary: report.summary.map(durable_state_summary_result),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn state_validate_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.validate_state_file() {
+        Ok(report) => ResponseEnvelope::success(
+            envelope.request_id,
+            StateValidateResult {
+                truth_kind: "durable".to_string(),
+                state_path: args.state_path.clone(),
+                present: report.present,
+                schema_version: report.schema_version,
+                valid: report.valid,
+                violations: report
+                    .violations
+                    .into_iter()
+                    .map(durable_state_violation_entry)
+                    .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn state_reset_response(
+    control: &LocalControlPlane,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload = match serde_json::from_value::<StateResetPayload>(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid state reset payload: {error}"),
+                None,
+            );
+        }
+    };
+    if payload.scope != "network_state_only" {
+        return ResponseEnvelope::error(
+            envelope.request_id,
+            ErrorCode::InvalidRequest,
+            "state reset scope must be network_state_only",
+            None,
+        );
+    }
+    if payload.confirmation != "preserve-identity-reset-network-state" {
+        return ResponseEnvelope::error(
+            envelope.request_id,
+            ErrorCode::InvalidRequest,
+            "state reset confirmation token did not match required guard",
+            None,
+        );
+    }
+
+    match control.reset_network_state() {
+        Ok(network_state_reset) => ResponseEnvelope::success(
+            envelope.request_id,
+            StateResetResult {
+                truth_kind: "durable".to_string(),
+                identity_preserved: true,
+                network_state_reset,
+                next_action: "daemon_restart_required".to_string(),
+            },
+        ),
         Err(error) => daemon_error_response(envelope.request_id, &error),
     }
 }
@@ -2596,6 +2725,113 @@ mod tests {
         );
         assert_eq!(result.mismatch_reasons.len(), 2);
         let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn state_show_response_reports_durable_summary() {
+        let state_path = unique_temp_path("quipd-state-show");
+        let control = LocalControlPlane::new(DaemonConfig::new("state-show", &state_path));
+        let state = fabric::fixture_daemon_state("state-show");
+        state.save(&state_path).expect("state should persist");
+        let args = test_args(state_path.to_string_lossy().as_ref());
+
+        let response = state_show_response(
+            &args,
+            &control,
+            RequestEnvelope {
+                request_id: "req-state-show".to_string(),
+                operation: "state.show".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: StateShowResult =
+            serde_json::from_value(response.result.expect("show result should exist"))
+                .expect("show result should deserialize");
+        assert_eq!(result.truth_kind, "durable");
+        assert!(result.present);
+        assert!(result.valid);
+        assert!(result.summary.is_some());
+        assert!(result.violations.is_empty());
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn state_validate_response_reports_field_level_violations() {
+        let state_path = unique_temp_path("quipd-state-validate");
+        let control = LocalControlPlane::new(DaemonConfig::new("state-validate", &state_path));
+        let mut value = serde_json::to_value(fabric::fixture_daemon_state("state-validate"))
+            .expect("state should serialize");
+        value["active_sessions"] = json!([
+            {
+                "session_id": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+            }
+        ]);
+        std::fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&value).expect("serialize"),
+        )
+        .expect("fixture should persist");
+        let args = test_args(state_path.to_string_lossy().as_ref());
+
+        let response = state_validate_response(
+            &args,
+            &control,
+            RequestEnvelope {
+                request_id: "req-state-validate".to_string(),
+                operation: "state.validate".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: StateValidateResult =
+            serde_json::from_value(response.result.expect("validate result should exist"))
+                .expect("validate result should deserialize");
+        assert_eq!(result.truth_kind, "durable");
+        assert!(!result.valid);
+        assert_eq!(result.violations.len(), 1);
+        assert_eq!(result.violations[0].path, "$.active_sessions");
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn state_reset_response_requires_confirmation_and_preserves_identity() {
+        let state_path = unique_temp_path("quipd-state-reset");
+        let control = LocalControlPlane::new(DaemonConfig::new("state-reset", &state_path));
+        let state = fabric::fixture_daemon_state("state-reset");
+        state.save(&state_path).expect("state should persist");
+
+        let response = state_reset_response(
+            &control,
+            RequestEnvelope {
+                request_id: "req-state-reset".to_string(),
+                operation: "state.reset".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({
+                    "scope": "network_state_only",
+                    "confirmation": "preserve-identity-reset-network-state"
+                }),
+            },
+        );
+
+        assert!(response.ok);
+        let result: StateResetResult =
+            serde_json::from_value(response.result.expect("reset result should exist"))
+                .expect("reset result should deserialize");
+        assert!(result.identity_preserved);
+        assert!(result.network_state_reset);
+        assert_eq!(result.next_action, "daemon_restart_required");
+        assert!(!state_path.exists());
     }
 
     #[test]

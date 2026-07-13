@@ -254,9 +254,33 @@ pub struct RuntimeHealthReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DurableStateValidationReport {
-    pub schema_version: u64,
+pub struct DurableStateViolation {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableStateSummary {
+    pub network: String,
+    pub local_peer_id: PeerId,
+    pub roles: Vec<DaemonRole>,
+    pub bootstrap_hints: usize,
+    pub relays: usize,
+    pub peers: usize,
+    pub capability_grants: usize,
+    pub revocations: usize,
+    pub denied_peers: usize,
+    pub path_candidates: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableStateInspectionReport {
     pub state_path: PathBuf,
+    pub present: bool,
+    pub schema_version: Option<u64>,
+    pub valid: bool,
+    pub violations: Vec<DurableStateViolation>,
+    pub summary: Option<DurableStateSummary>,
 }
 
 impl DaemonState {
@@ -629,15 +653,148 @@ impl DaemonState {
     }
 }
 
+fn durable_state_summary(state: &DaemonState) -> DurableStateSummary {
+    DurableStateSummary {
+        network: state.network.clone(),
+        local_peer_id: state.local_peer_id.clone(),
+        roles: state.roles.clone(),
+        bootstrap_hints: state.bootstrap.len(),
+        relays: state.relay_count(),
+        peers: state.peers.len(),
+        capability_grants: state.capability_grants.len(),
+        revocations: state.revocations.len(),
+        denied_peers: state.denied_peers.len(),
+        path_candidates: state.path_candidates.len(),
+    }
+}
+
+fn durable_state_schema_version(value: &Value) -> Option<u64> {
+    value
+        .as_object()
+        .and_then(|object| object.get("schema_version"))
+        .and_then(Value::as_u64)
+}
+
+fn durable_state_violation(
+    path: impl Into<String>,
+    message: impl Into<String>,
+) -> DurableStateViolation {
+    DurableStateViolation {
+        path: path.into(),
+        message: message.into(),
+    }
+}
+
+fn durable_state_violations_from_error(error: &DaemonStateError) -> Vec<DurableStateViolation> {
+    match error {
+        DaemonStateError::MissingSchemaVersion => {
+            vec![durable_state_violation(
+                "$.schema_version",
+                error.to_string(),
+            )]
+        }
+        DaemonStateError::UnsupportedSchemaVersion { .. } => {
+            vec![durable_state_violation(
+                "$.schema_version",
+                error.to_string(),
+            )]
+        }
+        DaemonStateError::UnsupportedDurableField(field) => {
+            vec![durable_state_violation(
+                format!("$.{field}"),
+                error.to_string(),
+            )]
+        }
+        _ => vec![durable_state_violation("$", error.to_string())],
+    }
+}
+
+pub fn inspect_durable_state_file(
+    path: impl AsRef<Path>,
+) -> Result<DurableStateInspectionReport, DaemonStateError> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(DurableStateInspectionReport {
+            state_path: path.to_path_buf(),
+            present: false,
+            schema_version: None,
+            valid: false,
+            violations: vec![durable_state_violation(
+                "$",
+                "durable state file is missing",
+            )],
+            summary: None,
+        });
+    }
+
+    let bytes = fs::read(path)?;
+    let value = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(DurableStateInspectionReport {
+                state_path: path.to_path_buf(),
+                present: true,
+                schema_version: None,
+                valid: false,
+                violations: vec![durable_state_violation(
+                    "$",
+                    format!("durable state is not valid JSON: {error}"),
+                )],
+                summary: None,
+            });
+        }
+    };
+    let schema_version = durable_state_schema_version(&value);
+    match validate_durable_state_value(&value) {
+        Ok(()) => {
+            let mut state = match serde_json::from_value::<DaemonState>(value) {
+                Ok(state) => state,
+                Err(error) => {
+                    return Ok(DurableStateInspectionReport {
+                        state_path: path.to_path_buf(),
+                        present: true,
+                        schema_version,
+                        valid: false,
+                        violations: vec![durable_state_violation(
+                            "$",
+                            format!("durable state could not be deserialized: {error}"),
+                        )],
+                        summary: None,
+                    });
+                }
+            };
+            state.active_sessions.clear();
+            Ok(DurableStateInspectionReport {
+                state_path: path.to_path_buf(),
+                present: true,
+                schema_version,
+                valid: true,
+                violations: Vec::new(),
+                summary: Some(durable_state_summary(&state)),
+            })
+        }
+        Err(error) => Ok(DurableStateInspectionReport {
+            state_path: path.to_path_buf(),
+            present: true,
+            schema_version,
+            valid: false,
+            violations: durable_state_violations_from_error(&error),
+            summary: None,
+        }),
+    }
+}
+
 pub fn validate_durable_state_file(
     path: impl AsRef<Path>,
-) -> Result<DurableStateValidationReport, DaemonStateError> {
-    let path = path.as_ref();
-    let value = serde_json::from_slice::<Value>(&fs::read(path)?)?;
-    validate_durable_state_value(&value)?;
-    Ok(DurableStateValidationReport {
-        schema_version: DAEMON_STATE_SCHEMA_VERSION,
-        state_path: path.to_path_buf(),
+) -> Result<DurableStateInspectionReport, DaemonStateError> {
+    let report = inspect_durable_state_file(path)?;
+    Ok(DurableStateInspectionReport {
+        state_path: report.state_path,
+        present: report.present,
+        schema_version: report.schema_version,
+        valid: report.valid,
+        violations: report.violations,
+        summary: None,
     })
 }
 
@@ -1127,7 +1284,11 @@ impl LocalControlPlane {
         Ok(self.ensure_state()?.active_sessions.clone())
     }
 
-    pub fn validate_state_file(&self) -> Result<DurableStateValidationReport, DaemonStateError> {
+    pub fn inspect_state_file(&self) -> Result<DurableStateInspectionReport, DaemonStateError> {
+        inspect_durable_state_file(&self.config.state_path)
+    }
+
+    pub fn validate_state_file(&self) -> Result<DurableStateInspectionReport, DaemonStateError> {
         validate_durable_state_file(&self.config.state_path)
     }
 
@@ -3238,8 +3399,11 @@ mod tests {
             .validate_state_file()
             .expect("state validation should succeed");
 
-        assert_eq!(report.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert_eq!(report.schema_version, Some(DAEMON_STATE_SCHEMA_VERSION));
         assert_eq!(report.state_path, temp);
+        assert!(report.present);
+        assert!(report.valid);
+        assert!(report.violations.is_empty());
         let _ = std::fs::remove_file(report.state_path);
     }
 
@@ -3256,6 +3420,67 @@ mod tests {
 
         assert!(removed);
         assert!(!temp.exists());
+    }
+
+    #[test]
+    fn inspect_state_file_reports_summary_for_valid_state() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-inspect-state.json");
+        let state = fixture_daemon_state("inspect-state-report");
+        state.save(&temp).expect("fixture state should persist");
+        let control = LocalControlPlane::new(DaemonConfig::new("inspect-state-report", &temp));
+
+        let report = control
+            .inspect_state_file()
+            .expect("state inspection should succeed");
+
+        assert!(report.present);
+        assert!(report.valid);
+        let summary = report.summary.expect("summary should be present");
+        assert_eq!(summary.network, "inspect-state-report");
+        assert_eq!(summary.bootstrap_hints, 2);
+        assert_eq!(summary.roles.len(), 2);
+        let _ = std::fs::remove_file(report.state_path);
+    }
+
+    #[test]
+    fn inspect_state_file_reports_missing_file_without_erroring() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-missing-state.json");
+        let control = LocalControlPlane::new(DaemonConfig::new("missing-state-report", &temp));
+
+        let report = control
+            .inspect_state_file()
+            .expect("missing state inspection should succeed");
+
+        assert!(!report.present);
+        assert!(!report.valid);
+        assert_eq!(report.schema_version, None);
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.summary.is_none());
+    }
+
+    #[test]
+    fn validate_state_file_reports_runtime_only_field_violation() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-invalid-runtime-field.json");
+        let mut value = serde_json::to_value(fixture_daemon_state("invalid-runtime-field"))
+            .expect("fixture state should serialize");
+        value["active_sessions"] = serde_json::json!([
+            {
+                "session_id": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+            }
+        ]);
+        std::fs::write(&temp, serde_json::to_vec_pretty(&value).expect("serialize"))
+            .expect("fixture should persist");
+        let control = LocalControlPlane::new(DaemonConfig::new("invalid-runtime-field", &temp));
+
+        let report = control
+            .validate_state_file()
+            .expect("state validation should return a report");
+
+        assert!(report.present);
+        assert!(!report.valid);
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].path, "$.active_sessions");
+        let _ = std::fs::remove_file(temp);
     }
 
     #[test]

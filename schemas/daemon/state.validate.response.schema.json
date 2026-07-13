@@ -8,10 +8,22 @@
         "result": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["truth_kind", "schema_version", "valid", "violations"],
+          "required": [
+            "truth_kind",
+            "state_path",
+            "present",
+            "schema_version",
+            "valid",
+            "violations"
+          ],
           "properties": {
             "truth_kind": { "const": "durable" },
-            "schema_version": { "type": "integer", "minimum": 1 },
+            "state_path": { "type": "string", "minLength": 1 },
+            "present": { "type": "boolean" },
+            "schema_version": {
+              "type": ["integer", "null"],
+              "minimum": 1
+            },
             "valid": { "type": "boolean" },
             "violations": {
               "type": "array",

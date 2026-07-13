@@ -9,7 +9,8 @@ use daemonapi::{
     RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
     RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
     SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
-    SessionUpgradePayload, SessionUpgradeResult,
+    SessionUpgradePayload, SessionUpgradeResult, StateResetPayload, StateResetResult,
+    StateShowResult, StateValidateResult,
 };
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
@@ -164,6 +165,7 @@ enum SessionCommand {
 
 #[derive(Subcommand, Debug)]
 enum StateCommand {
+    Show,
     Validate,
     Reset {
         #[arg(long)]
@@ -700,12 +702,103 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
         }
         Command::State { command } => match command {
-            StateCommand::Validate => {
-                let report = control.validate_state_file()?;
+            StateCommand::Show => {
+                let result = daemon_request::<StateShowResult>(&cli, "state.show", json!({}))?;
                 println!(
-                    "state_path={} schema_version={} valid=true",
-                    report.state_path.display(),
-                    report.schema_version
+                    "state_path={} present={} schema_version={} valid={} summary_network={} summary_local_peer={} summary_roles={} summary_bootstrap={} summary_relays={} summary_peers={} summary_grants={} summary_revocations={} summary_denied={} summary_path_candidates={} violations={} truth_kind={}",
+                    result.state_path,
+                    result.present,
+                    result
+                        .schema_version
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    result.valid,
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.network.clone())
+                        .unwrap_or_else(|| "none".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.local_peer_id.clone())
+                        .unwrap_or_else(|| "none".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.roles.join(","))
+                        .unwrap_or_else(|| "none".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.bootstrap_hints.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.relays.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.peers.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.capability_grants.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.revocations.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.denied_peers.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    result
+                        .summary
+                        .as_ref()
+                        .map(|summary| summary.path_candidates.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    if result.violations.is_empty() {
+                        "none".to_string()
+                    } else {
+                        result
+                            .violations
+                            .iter()
+                            .map(|violation| format!("{}={}", violation.path, violation.message))
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    },
+                    result.truth_kind,
+                );
+            }
+            StateCommand::Validate => {
+                let report =
+                    daemon_request::<StateValidateResult>(&cli, "state.validate", json!({}))?;
+                println!(
+                    "state_path={} present={} schema_version={} valid={} violations={} truth_kind={}",
+                    report.state_path,
+                    report.present,
+                    report
+                        .schema_version
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    report.valid,
+                    if report.violations.is_empty() {
+                        "none".to_string()
+                    } else {
+                        report
+                            .violations
+                            .iter()
+                            .map(|violation| format!("{}={}", violation.path, violation.message))
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    },
+                    report.truth_kind
                 );
             }
             StateCommand::Reset { confirm } => {
@@ -715,11 +808,21 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     )
                     .into());
                 }
-                let removed = control.reset_network_state()?;
+                let result = daemon_request::<StateResetResult>(
+                    &cli,
+                    "state.reset",
+                    serde_json::to_value(StateResetPayload {
+                        scope: "network_state_only".to_string(),
+                        confirmation: "preserve-identity-reset-network-state".to_string(),
+                    })?,
+                )?;
                 println!(
-                    "state_path={} identity_preserved=true network_state_reset={} next_action=bootstrap_required",
+                    "state_path={} identity_preserved={} network_state_reset={} next_action={} truth_kind={}",
                     cli.state_path,
-                    removed
+                    result.identity_preserved,
+                    result.network_state_reset,
+                    result.next_action,
+                    result.truth_kind
                 );
             }
         },

@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "request_id": "req-state-validate",
+  "result": {
+    "truth_kind": "durable",
+    "state_path": "/Users/example/.quip/net/state.json",
+    "present": true,
+    "schema_version": 1,
+    "valid": true,
+    "violations": []
+  },
+  "error": null
+}

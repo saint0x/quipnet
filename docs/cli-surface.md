@@ -118,6 +118,7 @@ Candidate subcommands:
 
 Primary source:
 - durable state contract
+- daemon-owned durable-state inspection and reset operations
 - daemon-assisted export or snapshot flows when available
 
 This group is where file-oriented behavior belongs. It should not be mixed with runtime session ownership.
@@ -165,6 +166,7 @@ Before this surface is complete, we need at least:
 - `quip authority show`
 - `quip authority sync`
 - `quip identity show`
+- `quip state show`
 - `quip state validate`
 - `quip state reset`
 

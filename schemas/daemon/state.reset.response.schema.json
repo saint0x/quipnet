@@ -17,10 +17,10 @@
           "properties": {
             "truth_kind": { "const": "durable" },
             "identity_preserved": { "type": "boolean", "const": true },
-            "network_state_reset": { "type": "boolean", "const": true },
+            "network_state_reset": { "type": "boolean" },
             "next_action": {
               "type": "string",
-              "enum": ["bootstrap_required", "daemon_restart_required"]
+              "enum": ["daemon_restart_required"]
             }
           }
         }

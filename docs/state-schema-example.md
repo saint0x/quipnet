@@ -13,54 +13,62 @@ This document builds on:
 ```json
 {
   "schema_version": 1,
-  "network": {
-    "id": "personalcloud-prod",
-    "authority": {
-      "origin": "https://authority.quip.example",
-      "subject": "authority-root"
-    }
+  "network": "personalcloud-prod",
+  "local_peer_id": "peer-local-001",
+  "roles": ["Edge", "Observer"],
+  "membership": {
+    "network_id": "personalcloud-prod",
+    "subject_peer_id": "peer-local-001",
+    "issuer_peer_id": "peer-authority-001",
+    "issued_at": 1720000000,
+    "expires_at": 1820000000,
+    "roles": ["member"],
+    "signature": []
   },
-  "authority_state": {
-    "last_accepted_revision": "rev-0042",
-    "last_sync_at": "2026-07-13T15:04:05Z",
-    "membership": {
-      "local_node_status": "active",
-      "accepted_groups": ["core", "relay-eligible"]
-    },
-    "capabilities": {
-      "local": ["connect", "relay", "sync"]
-    },
-    "revocations": {
-      "known_revisions": ["rev-0038", "rev-0040"]
+  "capability_grants": [
+    {
+      "network_id": "personalcloud-prod",
+      "subject_peer_id": "peer-local-001",
+      "issuer_peer_id": "peer-authority-001",
+      "capabilities": ["connect", "sync"],
+      "protocol_scopes": ["/quip/control/1"],
+      "resource_limits": {
+        "bandwidth_bps": 1500000000,
+        "concurrent_streams": 64,
+        "max_object_bytes": 10485760
+      },
+      "constraints": ["region=us-east-1"],
+      "not_before": 1720000000,
+      "expires_at": 1820000000,
+      "sequence": 7,
+      "signature": []
     }
-  },
-  "peers": {
-    "peer-001": {
-      "last_seen_identity": "peer-001",
-      "relationship": "known",
-      "topology": {
-        "last_reachable_at": "2026-07-13T14:00:00Z",
-        "reachability_class": "direct_or_relay"
+  ],
+  "revocations": [],
+  "denied_peers": [],
+  "bootstrap": [
+    {
+      "peer": "peer-relay-001",
+      "addresses": ["udp://203.0.113.10:443"],
+      "protocols": ["/quip/relay/1"],
+      "metadata": {
+        "source": "authority"
       }
     }
+  ],
+  "relay_map": null,
+  "peers": [],
+  "netcheck": {
+    "nat_type": "Unknown",
+    "udp_reachable": false,
+    "ipv6_reachable": false,
+    "hairpin_supported": false,
+    "public_udp_addr": null,
+    "port_mapped": false,
+    "probe_observations": []
   },
-  "path_history": {
-    "peer-001": {
-      "preferred_path_class": "direct",
-      "last_successful_path_class": "relay",
-      "observations": [
-        {
-          "at": "2026-07-13T14:00:00Z",
-          "path_class": "relay",
-          "outcome": "success"
-        }
-      ]
-    }
-  },
-  "recovery": {
-    "last_clean_checkpoint_at": "2026-07-13T15:00:00Z",
-    "integrity_state": "clean"
-  }
+  "queue_policies": [],
+  "path_candidates": []
 }
 ```
 

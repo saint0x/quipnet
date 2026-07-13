@@ -267,9 +267,12 @@ Purpose:
 - inspect durable remembered state, clearly labeled as durable
 
 Result should include:
+- durable state path
+- presence or absence of the durable file
 - schema version
-- durable state summary
-- last validation summary
+- validation success or failure
+- field-level violations when present
+- durable state summary when the file is valid
 
 ### `state.validate`
 
@@ -277,6 +280,8 @@ Purpose:
 - validate `~/.quip/net/state.json` against the durable schema contract
 
 Result should include:
+- durable state path
+- presence or absence of the durable file
 - schema version
 - validation success or failure
 - field-level violations when present
@@ -292,8 +297,8 @@ Request should include:
 
 Result should include:
 - identity preserved confirmation
-- reset durable state summary
-- next required bootstrap action summary
+- whether durable network state was actually removed
+- next required live-daemon action summary
 
 ## Output Semantics
 
@@ -317,6 +322,7 @@ Before Quip is production-ready, the implemented daemon surface should cover:
 - `authority.show`
 - `authority.sync`
 - `identity.show`
+- `state.show`
 - `state.validate`
 - `state.reset`
 
