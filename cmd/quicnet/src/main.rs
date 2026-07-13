@@ -1,10 +1,12 @@
 use clap::{Parser, Subcommand};
 use crypto::IdentityKeypair;
-use fabric::{DaemonConfig, LocalControlPlane, ProtocolId, TrafficClass};
+use fabric::PathCandidate;
+use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
 use quic::QuicTransportAdapter;
 use rand::rngs::OsRng;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -62,8 +64,8 @@ enum Command {
     },
     Netcheck,
     Path {
-        #[arg(long, default_value = "interactive")]
-        class: String,
+        #[command(subcommand)]
+        command: PathCommand,
     },
     Connect {
         protocol: String,
@@ -87,6 +89,26 @@ enum Command {
         overwrite: bool,
     },
     RelayStatus,
+}
+
+#[derive(Subcommand, Debug)]
+enum PathCommand {
+    Show {
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value = "interactive")]
+        class: String,
+    },
+    Watch {
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long, default_value = "interactive")]
+        class: String,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        #[arg(long, default_value_t = 1)]
+        sample_limit: u32,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -264,21 +286,51 @@ async fn main() {
                 println!("warning: {}", warning);
             }
         }
-        Command::Path { class } => {
-            let state = control
-                .ensure_state()
-                .expect("daemon state should be readable or creatable");
-            let class = parse_class(&class);
-            let peer = state
-                .first_peer()
-                .map(|entry| entry.snapshot.peer.clone())
-                .expect("a peer should exist in daemon state");
-            if let Some(decision) = state.best_path(&peer, class) {
-                println!("{}", decision.explanation.summary);
-            } else {
-                println!("no routing candidates available");
+        Command::Path { command } => match command {
+            PathCommand::Show { peer, class } => {
+                let state = control
+                    .ensure_state()
+                    .expect("daemon state should be readable or creatable");
+                let class = parse_class(&class);
+                let peer = resolve_peer(peer.as_deref(), &state);
+                if let Some(snapshot) = render_path_snapshot(&state, &peer, class) {
+                    println!("{}", snapshot);
+                } else {
+                    println!("no routing candidates available");
+                }
             }
-        }
+            PathCommand::Watch {
+                peer,
+                class,
+                interval_ms,
+                sample_limit,
+            } => {
+                let class = parse_class(&class);
+                let interval = Duration::from_millis(interval_ms.max(1));
+                let mut previous = None;
+                for index in 0..sample_limit.max(1) {
+                    let state = control
+                        .ensure_state()
+                        .expect("daemon state should be readable or creatable");
+                    let target = resolve_peer(peer.as_deref(), &state);
+                    let snapshot =
+                        render_path_snapshot(&state, &target, class).unwrap_or_else(|| {
+                            format!(
+                                "peer={} class={} no routing candidates available",
+                                target,
+                                class_label(class)
+                            )
+                        });
+                    if previous.as_ref() != Some(&snapshot) {
+                        println!("sample={} {}", index + 1, snapshot);
+                        previous = Some(snapshot);
+                    }
+                    if index + 1 < sample_limit.max(1) {
+                        tokio::time::sleep(interval).await;
+                    }
+                }
+            }
+        },
         Command::Connect {
             protocol,
             peer,
@@ -494,6 +546,70 @@ fn class_label(class: TrafficClass) -> &'static str {
     }
 }
 
+fn resolve_peer(peer: Option<&str>, state: &fabric::DaemonState) -> PeerId {
+    peer.and_then(|value| value.parse().ok())
+        .or_else(|| state.first_peer().map(|entry| entry.snapshot.peer.clone()))
+        .expect("a peer is required or must exist in daemon state")
+}
+
+fn render_path_snapshot(
+    state: &fabric::DaemonState,
+    peer: &PeerId,
+    class: TrafficClass,
+) -> Option<String> {
+    let decision = state.best_path(peer, class)?;
+    let alternatives = render_path_alternatives(state, peer, class, &decision.selected);
+    Some(format!(
+        "peer={} class={} selected_path={:?} selected_source={:?} selected_score={} relay_peer={} summary=\"{}\" strengths=\"{}\" tradeoffs=\"{}\" alternatives=[{}]",
+        peer,
+        class_label(class),
+        decision.selected.path_kind,
+        decision.selected.source,
+        decision.explanation.score.total,
+        decision
+            .selected
+            .relay_peer
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "direct".to_string()),
+        decision.explanation.summary,
+        decision.explanation.strengths.join("; "),
+        decision.explanation.tradeoffs.join("; "),
+        alternatives.join(", ")
+    ))
+}
+
+fn render_path_alternatives(
+    state: &fabric::DaemonState,
+    peer: &PeerId,
+    class: TrafficClass,
+    selected: &PathCandidate,
+) -> Vec<String> {
+    let mut candidates = state
+        .path_candidates_for(peer)
+        .into_iter()
+        .filter(|candidate| candidate.traffic_classes.contains(&class))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| candidate.score(class));
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate != selected)
+        .map(|candidate| {
+            format!(
+                "{:?}/score={}/source={:?}/relay={}",
+                candidate.path_kind,
+                candidate.score(class),
+                candidate.source,
+                candidate
+                    .relay_peer
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "direct".to_string())
+            )
+        })
+        .collect()
+}
+
 fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition) -> &'static str {
     match disposition {
         fabric::SessionReconcileDisposition::Unchanged => "unchanged",
@@ -570,5 +686,45 @@ fn parse_class(value: &str) -> TrafficClass {
         "bulk" => TrafficClass::Bulk,
         "background" => TrafficClass::Background,
         _ => TrafficClass::Interactive,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_path_snapshot_includes_selected_and_alternatives() {
+        let state = fabric::fixture_daemon_state("path-watch-cli");
+        let peer = state
+            .first_peer()
+            .map(|entry| entry.snapshot.peer.clone())
+            .expect("fixture peer should exist");
+
+        let snapshot = render_path_snapshot(&state, &peer, TrafficClass::Interactive)
+            .expect("snapshot should render");
+
+        assert!(snapshot.contains("selected_path=DirectIpv6"));
+        assert!(snapshot.contains("alternatives=[Relay/score="));
+        assert!(snapshot.contains("strengths=\""));
+    }
+
+    #[test]
+    fn render_path_alternatives_orders_candidates_by_score() {
+        let state = fabric::fixture_daemon_state("path-watch-cli");
+        let peer = state
+            .first_peer()
+            .map(|entry| entry.snapshot.peer.clone())
+            .expect("fixture peer should exist");
+        let selected = state
+            .best_path(&peer, TrafficClass::Interactive)
+            .expect("best path should exist")
+            .selected;
+
+        let alternatives =
+            render_path_alternatives(&state, &peer, TrafficClass::Interactive, &selected);
+
+        assert_eq!(alternatives.len(), 1);
+        assert!(alternatives[0].starts_with("Relay/score="));
     }
 }

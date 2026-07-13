@@ -186,6 +186,14 @@ impl DaemonState {
         crate::select_best_path(&candidates, class)
     }
 
+    pub fn path_candidates_for(&self, peer: &PeerId) -> Vec<PathCandidate> {
+        self.path_candidates
+            .iter()
+            .filter(|candidate| &candidate.peer == peer)
+            .cloned()
+            .collect()
+    }
+
     pub fn first_peer(&self) -> Option<&PeerInspection> {
         self.peers.first()
     }
