@@ -1,0 +1,14 @@
+{
+  "ok": true,
+  "request_id": "req-4101",
+  "result": {
+    "truth_kind": "runtime_and_durable",
+    "identity_path": "/Users/operator/.quip/identity/node.json",
+    "expected_node_id": "ed25519:local-peer",
+    "loaded_node_id": "ed25519:local-peer",
+    "authority_subject_peer_id": "ed25519:local-peer",
+    "match_result": "match",
+    "mismatch_reasons": []
+  },
+  "error": null
+}

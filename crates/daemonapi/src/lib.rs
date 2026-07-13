@@ -111,6 +111,29 @@ pub struct IdentityStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdentityShowResult {
+    pub truth_kind: String,
+    pub status: String,
+    pub identity_path: String,
+    pub node_id: String,
+    pub public_key_hex: String,
+    pub durable_state_peer_id: Option<String>,
+    pub authority_subject_peer_id: Option<String>,
+    pub state_binding_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdentityVerifyResult {
+    pub truth_kind: String,
+    pub identity_path: String,
+    pub expected_node_id: Option<String>,
+    pub loaded_node_id: String,
+    pub authority_subject_peer_id: Option<String>,
+    pub match_result: String,
+    pub mismatch_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DurableStateStatus {
     pub status: String,
     pub path: String,
@@ -126,6 +149,8 @@ pub struct AuthoritySyncStatus {
     pub authority_subject_mismatch: bool,
     pub reevaluated_sessions: usize,
     pub closed_sessions: usize,
+    pub degraded_sessions: usize,
+    pub migrated_sessions: usize,
     pub unchanged_sessions: usize,
     pub reconnect_suppressions_added: usize,
     pub reconnect_suppressions_cleared: usize,

@@ -10,11 +10,12 @@ use daemonapi::{
     AuthorityRevocationEntry, AuthorityRevocationsResult, AuthorityShowResult,
     AuthoritySyncOriginPayload, AuthoritySyncResult, AuthoritySyncRevocationsOriginPayload,
     AuthoritySyncSnapshotPayload, AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus,
-    ErrorCode, IdentityStatus, RequestEnvelope, ResponseEnvelope, RuntimeEventEntry,
-    RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
-    RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry,
-    RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary, SessionClosePayload,
-    SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
+    ErrorCode, IdentityShowResult, IdentityStatus, IdentityVerifyResult, RequestEnvelope,
+    ResponseEnvelope, RuntimeEventEntry, RuntimeEventsListResult, RuntimeHealthResult,
+    RuntimeListenerEntry, RuntimeListenersListResult, RuntimePathAlternativeEntry,
+    RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry, RuntimeSessionsListResult,
+    RuntimeStatusResult, RuntimeSummary, SessionClosePayload, SessionCloseResult,
+    SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
     SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
     SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
@@ -767,6 +768,8 @@ fn route_control_request(
         "authority.membership" => authority_membership_response(control, envelope),
         "authority.capabilities" => authority_capabilities_response(control, envelope),
         "authority.revocations" => authority_revocations_response(control, envelope),
+        "identity.show" => identity_show_response(args, control, local_identity, envelope),
+        "identity.verify" => identity_verify_response(args, control, local_identity, envelope),
         "authority.sync_snapshot" => runtime.block_on(authority_sync_snapshot_response(
             args,
             control,
@@ -987,6 +990,81 @@ fn authority_show_response(
                 authority,
             },
         ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn identity_show_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.ensure_state() {
+        Ok(state) => ResponseEnvelope::success(
+            envelope.request_id,
+            IdentityShowResult {
+                truth_kind: "runtime_and_durable".to_string(),
+                status: "loaded".to_string(),
+                identity_path: args.identity_path.clone(),
+                node_id: local_identity.peer_id().to_string(),
+                public_key_hex: hex_public_key(local_identity),
+                durable_state_peer_id: Some(state.local_peer_id.to_string()),
+                authority_subject_peer_id: Some(state.membership.subject_peer_id.to_string()),
+                state_binding_status: if state.local_peer_id == local_identity.peer_id()
+                    && state.membership.subject_peer_id == local_identity.peer_id()
+                {
+                    "matched".to_string()
+                } else {
+                    "mismatched".to_string()
+                },
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn identity_verify_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.ensure_state() {
+        Ok(state) => {
+            let loaded_node_id = local_identity.peer_id().to_string();
+            let expected_node_id = state.local_peer_id.to_string();
+            let authority_subject_peer_id = state.membership.subject_peer_id.to_string();
+            let mut mismatch_reasons = Vec::new();
+            if loaded_node_id != expected_node_id {
+                mismatch_reasons.push(format!(
+                    "durable state expects {} but daemon loaded {}",
+                    expected_node_id, loaded_node_id
+                ));
+            }
+            if loaded_node_id != authority_subject_peer_id {
+                mismatch_reasons.push(format!(
+                    "authority membership expects {} but daemon loaded {}",
+                    authority_subject_peer_id, loaded_node_id
+                ));
+            }
+            ResponseEnvelope::success(
+                envelope.request_id,
+                IdentityVerifyResult {
+                    truth_kind: "runtime_and_durable".to_string(),
+                    identity_path: args.identity_path.clone(),
+                    expected_node_id: Some(expected_node_id),
+                    loaded_node_id,
+                    authority_subject_peer_id: Some(authority_subject_peer_id),
+                    match_result: if mismatch_reasons.is_empty() {
+                        "match".to_string()
+                    } else {
+                        "mismatch".to_string()
+                    },
+                    mismatch_reasons,
+                },
+            )
+        }
         Err(error) => daemon_error_response(envelope.request_id, &error),
     }
 }
@@ -1718,6 +1796,15 @@ fn closure_reason_label(reason: &fabric::SessionClosureReason) -> String {
     }
 }
 
+fn hex_public_key(identity: &IdentityKeypair) -> String {
+    identity
+        .public_key()
+        .bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
 fn parse_hex_session_id(value: &str) -> Result<[u8; 16], std::io::Error> {
     if value.len() != 32 {
         return Err(std::io::Error::other(
@@ -1862,9 +1949,11 @@ fn reprobe_summary_line(report: &fabric::NetcheckReprobeReport) -> String {
 
 fn authority_reevaluation_summary_line(report: &fabric::AuthorityReevaluationReport) -> String {
     format!(
-        "reevaluated={} closed={} unchanged={} suppressed_added={} suppressed_cleared={} local_policy_denied={} subject_mismatch={} local_membership_denied={} peer_membership_denied={} capability_denied={} reason={}",
+        "reevaluated={} closed={} degraded={} migrated={} unchanged={} suppressed_added={} suppressed_cleared={} local_policy_denied={} subject_mismatch={} local_membership_denied={} peer_membership_denied={} capability_denied={} reason={}",
         report.reevaluated_sessions,
         report.closed_sessions,
+        report.degraded_sessions,
+        report.migrated_sessions,
         report.unchanged_sessions,
         report.reconnect_suppressions_added,
         report.reconnect_suppressions_cleared,
@@ -1902,6 +1991,8 @@ fn latest_authority_status(
         authority_subject_mismatch: health.authority_subject_status == "mismatched",
         reevaluated_sessions: 0,
         closed_sessions: 0,
+        degraded_sessions: 0,
+        migrated_sessions: 0,
         unchanged_sessions: 0,
         reconnect_suppressions_added: 0,
         reconnect_suppressions_cleared: 0,
@@ -1927,6 +2018,16 @@ fn latest_authority_status(
         status.closed_sessions = event
             .details
             .get("closed_sessions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.degraded_sessions = event
+            .details
+            .get("degraded_sessions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.migrated_sessions = event
+            .details
+            .get("migrated_sessions")
             .and_then(|value| value.as_u64())
             .unwrap_or(0) as usize;
         status.unchanged_sessions = event
@@ -2051,7 +2152,7 @@ where
     };
 
     if let Err(error) = transport.record_runtime_event(
-            "authority.sync_completed",
+        "authority.sync_completed",
         fabric::RuntimeEventSubject {
             kind: "authority".to_string(),
             id: runtime_peer,
@@ -2376,21 +2477,107 @@ mod tests {
             bootstrap_hints_removed: 0,
             relay_announcements_added: 0,
         }));
-        assert!(!state_sync_requires_reevaluation(&fabric::StateSyncReport {
-            membership_changed: false,
-            grants_added: 0,
-            grants_removed: 0,
-            revocations_added: 0,
-            bootstrap_hints_added: 0,
-            bootstrap_hints_removed: 0,
-            relay_announcements_added: 0,
-        }));
+        assert!(!state_sync_requires_reevaluation(
+            &fabric::StateSyncReport {
+                membership_changed: false,
+                grants_added: 0,
+                grants_removed: 0,
+                revocations_added: 0,
+                bootstrap_hints_added: 0,
+                bootstrap_hints_removed: 0,
+                relay_announcements_added: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn identity_show_response_reports_runtime_and_durable_binding() {
+        let state_path = unique_temp_path("quipd-identity-show");
+        let control = LocalControlPlane::new(DaemonConfig::new("identity-show", &state_path));
+        let local_identity = IdentityKeypair::from_secret_bytes([99_u8; 32]);
+        let mut state = fabric::fixture_daemon_state("identity-show");
+        state.local_peer_id = local_identity.peer_id();
+        state.membership.subject_peer_id = local_identity.peer_id();
+        state.save(&state_path).expect("state should persist");
+        let args = test_args(state_path.to_string_lossy().as_ref());
+
+        let response = identity_show_response(
+            &args,
+            &control,
+            &local_identity,
+            RequestEnvelope {
+                request_id: "req-identity-show".to_string(),
+                operation: "identity.show".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: IdentityShowResult =
+            serde_json::from_value(response.result.expect("show result should exist"))
+                .expect("show result should deserialize");
+        assert_eq!(result.node_id, local_identity.peer_id().to_string());
+        assert_eq!(result.state_binding_status, "matched");
+        assert_eq!(result.truth_kind, "runtime_and_durable");
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn identity_verify_response_reports_mismatch_against_durable_and_authority_state() {
+        let state_path = unique_temp_path("quipd-identity-verify");
+        let control = LocalControlPlane::new(DaemonConfig::new("identity-verify", &state_path));
+        let local_identity = IdentityKeypair::from_secret_bytes([100_u8; 32]);
+        let authority = IdentityKeypair::from_secret_bytes([101_u8; 32]);
+        let different_identity = IdentityKeypair::from_secret_bytes([102_u8; 32]);
+        let mut state = fabric::fixture_daemon_state("identity-verify");
+        state.local_peer_id = different_identity.peer_id();
+        state.membership = membership::MembershipCertificate::issue(
+            &authority,
+            fabric::NetworkId::derive("identity-verify"),
+            different_identity.peer_id(),
+            100,
+            300,
+            vec!["member".to_string()],
+        );
+        state.save(&state_path).expect("state should persist");
+        let args = test_args(state_path.to_string_lossy().as_ref());
+
+        let response = identity_verify_response(
+            &args,
+            &control,
+            &local_identity,
+            RequestEnvelope {
+                request_id: "req-identity-verify".to_string(),
+                operation: "identity.verify".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: IdentityVerifyResult =
+            serde_json::from_value(response.result.expect("verify result should exist"))
+                .expect("verify result should deserialize");
+        assert_eq!(result.match_result, "mismatch");
+        assert_eq!(result.loaded_node_id, local_identity.peer_id().to_string());
+        assert_eq!(
+            result.expected_node_id,
+            Some(different_identity.peer_id().to_string())
+        );
+        assert_eq!(result.mismatch_reasons.len(), 2);
+        let _ = std::fs::remove_file(state_path);
     }
 
     #[test]
     fn runtime_status_reports_authority_subject_mismatch_instead_of_failing() {
         let state_path = unique_temp_path("quipd-runtime-status-subject-mismatch");
-        let control = LocalControlPlane::new(DaemonConfig::new("status-subject-mismatch", &state_path));
+        let control =
+            LocalControlPlane::new(DaemonConfig::new("status-subject-mismatch", &state_path));
         let local_identity = IdentityKeypair::from_secret_bytes([101_u8; 32]);
         let other_identity = IdentityKeypair::from_secret_bytes([102_u8; 32]);
         let authority = IdentityKeypair::from_secret_bytes([103_u8; 32]);
@@ -2496,8 +2683,8 @@ mod tests {
             None,
             None,
             move |_| {
-                let mut updated = fabric::DaemonState::load(&state_path_for_closure)
-                    .expect("state should load");
+                let mut updated =
+                    fabric::DaemonState::load(&state_path_for_closure).expect("state should load");
                 updated.capability_grants.clear();
                 updated
                     .save(&state_path_for_closure)

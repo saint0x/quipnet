@@ -41,7 +41,34 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "authority_reevaluation_migrates_session_when_a_better_eligible_path_emerges"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "authority_reevaluation_degrades_session_when_no_eligible_replacement_path_exists"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
       "args": ["test", "-p", "quipd", "authority_sync_response_triggers_live_reevaluation_when_grants_are_removed"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quipd", "identity_"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",

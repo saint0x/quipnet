@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "request_id": "req-4100",
+  "result": {
+    "truth_kind": "runtime_and_durable",
+    "status": "loaded",
+    "identity_path": "/Users/operator/.quip/identity/node.json",
+    "node_id": "ed25519:local-peer",
+    "public_key_hex": "4d8ecf55d03a8b5674d8147b0f1ce4c7f99ed1ab3ddc7a91b4bf3f74d749ed21",
+    "durable_state_peer_id": "ed25519:local-peer",
+    "authority_subject_peer_id": "ed25519:local-peer",
+    "state_binding_status": "matched"
+  },
+  "error": null
+}

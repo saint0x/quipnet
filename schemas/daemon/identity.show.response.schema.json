@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/identity.show.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "truth_kind",
+            "status",
+            "identity_path",
+            "node_id",
+            "public_key_hex",
+            "state_binding_status"
+          ],
+          "properties": {
+            "truth_kind": { "const": "runtime_and_durable" },
+            "status": { "const": "loaded" },
+            "identity_path": { "type": "string", "minLength": 1 },
+            "node_id": { "type": "string", "minLength": 1 },
+            "public_key_hex": { "type": "string", "minLength": 64 },
+            "durable_state_peer_id": { "type": "string", "minLength": 1 },
+            "authority_subject_peer_id": { "type": "string", "minLength": 1 },
+            "state_binding_status": {
+              "type": "string",
+              "enum": ["matched", "mismatched"]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

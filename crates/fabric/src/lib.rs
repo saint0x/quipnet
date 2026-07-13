@@ -170,6 +170,8 @@ pub struct SessionReconcileReport {
 pub struct AuthorityReevaluationReport {
     pub reevaluated_sessions: usize,
     pub closed_sessions: usize,
+    pub degraded_sessions: usize,
+    pub migrated_sessions: usize,
     pub unchanged_sessions: usize,
     pub reconnect_suppressions_added: usize,
     pub reconnect_suppressions_cleared: usize,
@@ -1595,6 +1597,8 @@ impl LocalControlPlane {
         let local_policy_denied = local_policy_reason.is_some();
         let mut reevaluated_sessions = 0;
         let mut closed_sessions = 0;
+        let mut degraded_sessions = 0;
+        let mut migrated_sessions = 0;
         let mut unchanged_sessions = 0;
         let mut reconnect_suppressions_added = 0;
         let mut reconnect_suppressions_cleared = 0;
@@ -1688,13 +1692,104 @@ impl LocalControlPlane {
                 if suppression_present {
                     reconnect_suppressions_cleared += 1;
                 }
-                unchanged_sessions += 1;
+                match state.route_plan(&session.peer, Some(protocol.clone()), session.class) {
+                    Ok(route) if session_matches_route(&session, &route) => {
+                        if session.state == RuntimeSessionState::Degraded {
+                            let _ = transport.update_session_state(
+                                &session.session_id,
+                                RuntimeSessionState::Active,
+                                None,
+                                Some(
+                                    "authority reevaluation restored the selected path posture"
+                                        .to_string(),
+                                ),
+                            )?;
+                        }
+                        unchanged_sessions += 1;
+                    }
+                    Ok(route) => {
+                        if session.migration_capable {
+                            transport.record_runtime_event(
+                                "path.migration_started",
+                                RuntimeEventSubject {
+                                    kind: "session".to_string(),
+                                    id: hex_session_id(&session.session_id),
+                                },
+                                json!({
+                                    "peer_id": session.peer.to_string(),
+                                    "protocol": protocol.as_str(),
+                                    "class": format!("{:?}", session.class),
+                                    "reason": "authority reevaluation selected a different eligible path"
+                                }),
+                            )?;
+                            let _ = transport.update_session_state(
+                                &session.session_id,
+                                RuntimeSessionState::Migrating,
+                                None,
+                                Some(
+                                    "authority reevaluation selected a different eligible path"
+                                        .to_string(),
+                                ),
+                            )?;
+                            let _ = transport.migrate(&session, route).await?;
+                            migrated_sessions += 1;
+                        } else {
+                            let reason = "authority reevaluation selected a different eligible path but the active session cannot migrate".to_string();
+                            let _ = transport.update_session_state(
+                                &session.session_id,
+                                RuntimeSessionState::Degraded,
+                                None,
+                                Some(reason.clone()),
+                            )?;
+                            transport.record_runtime_event(
+                                "path.degraded",
+                                RuntimeEventSubject {
+                                    kind: "session".to_string(),
+                                    id: hex_session_id(&session.session_id),
+                                },
+                                json!({
+                                    "peer_id": session.peer.to_string(),
+                                    "protocol": protocol.as_str(),
+                                    "class": format!("{:?}", session.class),
+                                    "reason": reason
+                                }),
+                            )?;
+                            degraded_sessions += 1;
+                        }
+                    }
+                    Err(DaemonStateError::NoRoute(_)) => {
+                        let reason = "authority reevaluation found no eligible replacement path; keeping the current session alive in degraded posture".to_string();
+                        let _ = transport.update_session_state(
+                            &session.session_id,
+                            RuntimeSessionState::Degraded,
+                            None,
+                            Some(reason.clone()),
+                        )?;
+                        transport.record_runtime_event(
+                            "path.degraded",
+                            RuntimeEventSubject {
+                                kind: "session".to_string(),
+                                id: hex_session_id(&session.session_id),
+                            },
+                            json!({
+                                "peer_id": session.peer.to_string(),
+                                "protocol": protocol.as_str(),
+                                "class": format!("{:?}", session.class),
+                                "reason": reason
+                            }),
+                        )?;
+                        degraded_sessions += 1;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
 
         let report = AuthorityReevaluationReport {
             reevaluated_sessions,
             closed_sessions,
+            degraded_sessions,
+            migrated_sessions,
             unchanged_sessions,
             reconnect_suppressions_added,
             reconnect_suppressions_cleared,
@@ -1715,6 +1810,8 @@ impl LocalControlPlane {
             json!({
                 "reevaluated_sessions": report.reevaluated_sessions,
                 "closed_sessions": report.closed_sessions,
+                "degraded_sessions": report.degraded_sessions,
+                "migrated_sessions": report.migrated_sessions,
                 "unchanged_sessions": report.unchanged_sessions,
                 "reconnect_suppressions_added": report.reconnect_suppressions_added,
                 "reconnect_suppressions_cleared": report.reconnect_suppressions_cleared,
@@ -3744,6 +3841,113 @@ mod tests {
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();
+    }
+
+    #[tokio::test]
+    async fn authority_reevaluation_migrates_session_when_a_better_eligible_path_emerges() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quipnet-authority-reevaluation-migrate-state");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([116_u8; 32]);
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "authority-reevaluation-migrate-prod",
+            &state_path,
+            115,
+            116,
+            b"authority-reevaluation-migrate-runtime",
+            b"authority-reevaluation-migrate-target",
+        )
+        .await;
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.netcheck.udp_reachable = true;
+        updated.netcheck.ipv6_reachable = false;
+        updated.netcheck.public_udp_addr = Some("203.0.113.116:8443".to_string());
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let report = control
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
+            .await
+            .expect("authority reevaluation should migrate the session");
+
+        assert_eq!(report.reevaluated_sessions, 1);
+        assert_eq!(report.migrated_sessions, 1);
+        assert_eq!(report.degraded_sessions, 0);
+        assert_eq!(report.closed_sessions, 0);
+        let runtime = transport
+            .session_snapshot(&session.session_id)
+            .expect("runtime lookup should succeed")
+            .expect("runtime session should still exist");
+        assert!(matches!(
+            runtime.path_kind,
+            PathKind::DirectUdp | PathKind::DirectIpv6
+        ));
+        assert_eq!(runtime.relay_peer, None);
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let events = transport.recent_events(16).expect("events should load");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "path.migration_started"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "path.migration_completed"));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn authority_reevaluation_degrades_session_when_no_eligible_replacement_path_exists() {
+        let state_path = unique_state_path("quipnet-authority-reevaluation-degrade-state");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([118_u8; 32]);
+        let (control, transport, session, _bootstrap_peer) = establish_persisted_direct_session(
+            "authority-reevaluation-degrade-prod",
+            &state_path,
+            117,
+            118,
+            b"authority-reevaluation-degrade-target",
+        )
+        .await;
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.netcheck.udp_reachable = false;
+        updated.netcheck.ipv6_reachable = false;
+        updated.netcheck.public_udp_addr = None;
+        updated.bootstrap.clear();
+        updated.relay_map = None;
+        updated.path_candidates.clear();
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let report = control
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
+            .await
+            .expect("authority reevaluation should degrade the session");
+
+        assert_eq!(report.reevaluated_sessions, 1);
+        assert_eq!(report.degraded_sessions, 1);
+        assert_eq!(report.migrated_sessions, 0);
+        assert_eq!(report.closed_sessions, 0);
+        let runtime = transport
+            .session_snapshot(&session.session_id)
+            .expect("runtime lookup should succeed")
+            .expect("runtime session should still exist");
+        assert_eq!(runtime.state, RuntimeSessionState::Degraded);
+        assert!(runtime
+            .state_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no eligible replacement path"));
+
+        let events = transport.recent_events(16).expect("events should load");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "path.degraded"));
+
+        let _ = std::fs::remove_file(state_path);
     }
 
     #[tokio::test]

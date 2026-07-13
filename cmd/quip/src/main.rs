@@ -4,11 +4,12 @@ use daemonapi::{
     AuthKind, AuthorityCapabilitiesResult, AuthorityMembershipResult, AuthorityRevocationsResult,
     AuthorityShowResult, AuthoritySyncOriginPayload, AuthoritySyncResult,
     AuthoritySyncRevocationsOriginPayload, AuthoritySyncSnapshotPayload, DaemonEndpointDiscovery,
-    RequestAuth, RequestEnvelope, ResponseEnvelope, RuntimeEventsListResult, RuntimeHealthResult,
-    RuntimeListenerEntry, RuntimeListenersListResult, RuntimePathAlternativeEntry,
-    RuntimePathEntry, RuntimePathsListResult, RuntimeSessionsListResult, RuntimeStatusResult,
-    SessionClosePayload, SessionCloseResult, SessionConnectPayload, SessionConnectResult,
-    SessionReconcilePayload, SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
+    IdentityShowResult, IdentityVerifyResult, RequestAuth, RequestEnvelope, ResponseEnvelope,
+    RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
+    RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
+    RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
+    SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
+    SessionUpgradePayload, SessionUpgradeResult,
 };
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
@@ -195,6 +196,7 @@ enum AuthorityCommand {
 #[derive(Subcommand, Debug)]
 enum IdentityCommand {
     Show,
+    Verify,
     Init {
         #[arg(long, default_value_t = false)]
         overwrite: bool,
@@ -248,7 +250,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             match daemon_request::<RuntimeStatusResult>(&cli, "runtime.status", json!({})) {
                 Ok(status) => {
                     println!(
-                        "daemon_health={} identity_status={} identity_peer={} durable_state_status={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} runtime_sessions={} active_paths={} reconnect_state={} truth_kind={}",
+                        "daemon_health={} identity_status={} identity_peer={} durable_state_status={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} runtime_sessions={} active_paths={} reconnect_state={} truth_kind={}",
                         status.daemon_health,
                         status.identity.status,
                         status.identity.node_id,
@@ -261,6 +263,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         status.authority.local_policy_reason.as_deref().unwrap_or("none"),
                         status.authority.reevaluated_sessions,
                         status.authority.closed_sessions,
+                        status.authority.degraded_sessions,
+                        status.authority.migrated_sessions,
                         status.authority.unchanged_sessions,
                         status.authority.reconnect_suppressions_added,
                         status.authority.reconnect_suppressions_cleared,
@@ -721,7 +725,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 let authority =
                     daemon_request::<AuthorityShowResult>(&cli, "authority.show", json!({}))?;
                 println!(
-                    "network={} local_peer={} membership_subject={} membership_issuer={} roles={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} configured_origin={} configured_subject={} configured_snapshot={} truth_kind={}",
+                    "network={} local_peer={} membership_subject={} membership_issuer={} roles={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} configured_origin={} configured_subject={} configured_snapshot={} truth_kind={}",
                     authority.network,
                     authority.local_peer_id,
                     authority.membership_subject_peer_id,
@@ -744,6 +748,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         .unwrap_or("none"),
                     authority.authority.reevaluated_sessions,
                     authority.authority.closed_sessions,
+                    authority.authority.degraded_sessions,
+                    authority.authority.migrated_sessions,
                     authority.authority.unchanged_sessions,
                     authority.authority.reconnect_suppressions_added,
                     authority.authority.reconnect_suppressions_cleared,
@@ -845,7 +851,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     serde_json::to_value(AuthoritySyncSnapshotPayload { authority_snapshot })?,
                 )?;
                 println!(
-                    "synced network={} local_peer={} grants_added={} grants_removed={} revocations_added={} bootstrap_hints_added={} bootstrap_hints_removed={} relay_announcements_added={} membership_changed={} authority_source={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
+                    "synced network={} local_peer={} grants_added={} grants_removed={} revocations_added={} bootstrap_hints_added={} bootstrap_hints_removed={} relay_announcements_added={} membership_changed={} authority_source={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
                     result.network,
                     result.local_peer_id,
                     result.grants_added,
@@ -861,6 +867,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     result.authority.health,
                     result.authority.reevaluated_sessions,
                     result.authority.closed_sessions,
+                    result.authority.degraded_sessions,
+                    result.authority.migrated_sessions,
                     result.authority.reconnect_suppressions_added,
                     result.truth_kind
                 );
@@ -878,7 +886,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     })?,
                 )?;
                 println!(
-                    "synced network={} local_peer={} grants_added={} grants_removed={} revocations_added={} bootstrap_hints_added={} bootstrap_hints_removed={} relay_announcements_added={} membership_changed={} authority_source={} authority_origin={} authority_subject={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
+                    "synced network={} local_peer={} grants_added={} grants_removed={} revocations_added={} bootstrap_hints_added={} bootstrap_hints_removed={} relay_announcements_added={} membership_changed={} authority_source={} authority_origin={} authority_subject={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
                     result.network,
                     result.local_peer_id,
                     result.grants_added,
@@ -896,6 +904,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     result.authority.health,
                     result.authority.reevaluated_sessions,
                     result.authority.closed_sessions,
+                    result.authority.degraded_sessions,
+                    result.authority.migrated_sessions,
                     result.authority.reconnect_suppressions_added,
                     result.truth_kind
                 );
@@ -909,7 +919,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     })?,
                 )?;
                 println!(
-                    "synced-revocations network={} local_peer={} revocations_added={} membership_changed={} authority_source={} authority_origin={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
+                    "synced-revocations network={} local_peer={} revocations_added={} membership_changed={} authority_source={} authority_origin={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
                     result.network,
                     result.local_peer_id,
                     result.revocations_added,
@@ -921,6 +931,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     result.authority.health,
                     result.authority.reevaluated_sessions,
                     result.authority.closed_sessions,
+                    result.authority.degraded_sessions,
+                    result.authority.migrated_sessions,
                     result.authority.reconnect_suppressions_added,
                     result.truth_kind
                 );
@@ -928,12 +940,36 @@ async fn run() -> Result<(), Box<dyn Error>> {
         },
         Command::Identity { command } => match command {
             IdentityCommand::Show => {
-                let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
+                let identity =
+                    daemon_request::<IdentityShowResult>(&cli, "identity.show", json!({}))?;
                 println!(
-                    "identity_path={} peer={} public_key_hex={}",
-                    cli.identity_path,
-                    identity.peer_id(),
-                    hex_public_key(&identity)
+                    "identity_path={} load_status={} peer={} public_key_hex={} durable_state_peer={} authority_subject_peer={} state_binding={} truth_kind={}",
+                    identity.identity_path,
+                    identity.status,
+                    identity.node_id,
+                    identity.public_key_hex,
+                    identity.durable_state_peer_id.as_deref().unwrap_or("none"),
+                    identity.authority_subject_peer_id.as_deref().unwrap_or("none"),
+                    identity.state_binding_status,
+                    identity.truth_kind
+                );
+            }
+            IdentityCommand::Verify => {
+                let identity =
+                    daemon_request::<IdentityVerifyResult>(&cli, "identity.verify", json!({}))?;
+                println!(
+                    "identity_path={} expected_peer={} loaded_peer={} authority_subject_peer={} match_result={} mismatch_reasons={} truth_kind={}",
+                    identity.identity_path,
+                    identity.expected_node_id.as_deref().unwrap_or("none"),
+                    identity.loaded_node_id,
+                    identity.authority_subject_peer_id.as_deref().unwrap_or("none"),
+                    identity.match_result,
+                    if identity.mismatch_reasons.is_empty() {
+                        "none".to_string()
+                    } else {
+                        identity.mismatch_reasons.join("|")
+                    },
+                    identity.truth_kind
                 );
             }
             IdentityCommand::Init { overwrite } => {
@@ -1303,20 +1339,6 @@ fn parse_hex_session_id(value: &str) -> Result<[u8; 16], std::io::Error> {
             .map_err(|_| usage_error("session ids supplied to CLI must be valid hex"))?;
     }
     Ok(session_id)
-}
-
-fn load_identity(
-    identity_path: &str,
-    passphrase_env: &str,
-) -> Result<IdentityKeypair, Box<dyn Error>> {
-    let passphrase = std::env::var(passphrase_env).map_err(|_| {
-        usage_error(format!(
-            "identity passphrase env var {passphrase_env} must be set"
-        ))
-    })?;
-    FileKeystore::new(identity_path)
-        .load(&passphrase)
-        .map_err(Into::into)
 }
 
 fn init_identity(

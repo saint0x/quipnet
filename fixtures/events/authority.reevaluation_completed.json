@@ -10,8 +10,11 @@
   "details": {
     "reevaluated_sessions": 1,
     "closed_sessions": 1,
+    "degraded_sessions": 0,
+    "migrated_sessions": 0,
     "unchanged_sessions": 0,
     "reconnect_suppressions_added": 1,
+    "reconnect_suppressions_cleared": 0,
     "local_policy_denied": false
   }
 }
