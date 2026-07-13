@@ -73,6 +73,15 @@ enum Command {
         class: String,
     },
     SessionStatus,
+    SessionClose {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    SessionUpgrade {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    SessionReconcile,
     IdentityInit {
         #[arg(long, default_value_t = false)]
         overwrite: bool,
@@ -90,11 +99,8 @@ async fn main() {
     ));
     match cli.command.unwrap_or(Command::Status) {
         Command::IdentityInit { overwrite } => {
-            let identity = init_identity(
-                &cli.identity_path,
-                &cli.identity_passphrase_env,
-                overwrite,
-            );
+            let identity =
+                init_identity(&cli.identity_path, &cli.identity_passphrase_env, overwrite);
             println!(
                 "identity_path={} peer={} public_key_hex={}",
                 cli.identity_path,
@@ -336,8 +342,9 @@ async fn main() {
             } else {
                 for session in sessions {
                     println!(
-                        "session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={}",
+                        "session_id={} transport_session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={}",
                         hex_session_id(&session.session_id),
+                        hex_session_id(&session.transport_session_id),
                         session
                             .relay_attempt_id
                             .as_ref()
@@ -362,6 +369,95 @@ async fn main() {
                         session.migration_capable
                     );
                 }
+            }
+        }
+        Command::SessionClose { session } => {
+            let sessions = control
+                .session_snapshots()
+                .expect("daemon state should be readable or creatable");
+            let session_id = resolve_session_id(session.as_deref(), &sessions);
+            let transport = QuicTransportAdapter::default();
+            control
+                .close_session(&session_id, &transport)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("session-close failed: {error}");
+                    std::process::exit(1);
+                });
+            println!("closed session_id={}", hex_session_id(&session_id));
+        }
+        Command::SessionUpgrade { session } => {
+            let sessions = control
+                .session_snapshots()
+                .expect("daemon state should be readable or creatable");
+            let session_id = resolve_session_id(session.as_deref(), &sessions);
+            let transport = QuicTransportAdapter::with_identity(
+                fabric::NetworkId::derive(&cli.network),
+                load_identity(&cli.identity_path, &cli.identity_passphrase_env),
+            );
+            let session = control
+                .upgrade_session(&session_id, &transport)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("session-upgrade failed: {error}");
+                    std::process::exit(1);
+                });
+            println!(
+                "session_id={} transport_session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={}",
+                hex_session_id(&session.session_id),
+                hex_session_id(&session.transport_session_id),
+                session
+                    .relay_attempt_id
+                    .as_ref()
+                    .map(hex_session_id)
+                    .unwrap_or_else(|| "none".to_string()),
+                session.peer,
+                session
+                    .protocol
+                    .as_ref()
+                    .map(ProtocolId::as_str)
+                    .unwrap_or("none"),
+                class_label(session.class),
+                session.path_kind,
+                session
+                    .relay_peer
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "direct".to_string()),
+                session.remote_endpoint,
+                session.relay_endpoint.unwrap_or_else(|| "none".to_string()),
+                session.datagrams_capable,
+                session.migration_capable
+            );
+        }
+        Command::SessionReconcile => {
+            let transport = QuicTransportAdapter::with_identity(
+                fabric::NetworkId::derive(&cli.network),
+                load_identity(&cli.identity_path, &cli.identity_passphrase_env),
+            );
+            let report = control
+                .reconcile_sessions(&transport)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("session-reconcile failed: {error}");
+                    std::process::exit(1);
+                });
+            println!(
+                "examined={} unchanged={} upgraded={} closed={}",
+                report.examined, report.unchanged, report.upgraded, report.closed
+            );
+            for entry in report.entries {
+                println!(
+                    "session_id={} peer={} disposition={} path={} reason={}",
+                    hex_session_id(&entry.session_id),
+                    entry.peer,
+                    reconcile_disposition_label(&entry.disposition),
+                    entry
+                        .path_kind
+                        .map(|path| format!("{path:?}"))
+                        .unwrap_or_else(|| "none".to_string()),
+                    entry.reason
+                );
             }
         }
         Command::RelayStatus => {
@@ -398,11 +494,41 @@ fn class_label(class: TrafficClass) -> &'static str {
     }
 }
 
+fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition) -> &'static str {
+    match disposition {
+        fabric::SessionReconcileDisposition::Unchanged => "unchanged",
+        fabric::SessionReconcileDisposition::Upgraded => "upgraded",
+        fabric::SessionReconcileDisposition::Closed => "closed",
+    }
+}
+
 fn hex_session_id(session_id: &[u8; 16]) -> String {
     session_id
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+fn resolve_session_id(session: Option<&str>, sessions: &[fabric::SessionSnapshot]) -> [u8; 16] {
+    session
+        .map(parse_hex_session_id)
+        .or_else(|| sessions.first().map(|entry| entry.session_id))
+        .expect("a session id is required or an active session must exist")
+}
+
+fn parse_hex_session_id(value: &str) -> [u8; 16] {
+    assert_eq!(
+        value.len(),
+        32,
+        "session ids supplied to CLI must be 32 hex characters"
+    );
+    let mut session_id = [0_u8; 16];
+    for (index, slot) in session_id.iter_mut().enumerate() {
+        let offset = index * 2;
+        *slot = u8::from_str_radix(&value[offset..offset + 2], 16)
+            .expect("session ids supplied to CLI must be valid hex");
+    }
+    session_id
 }
 
 fn load_identity(identity_path: &str, passphrase_env: &str) -> IdentityKeypair {
