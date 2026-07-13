@@ -336,3 +336,67 @@ pub trait Fabric: Send + Sync {
     async fn find_providers(&self, cid: ContentId) -> Result<Vec<PeerId>, TransportError>;
     fn path_stats(&self, peer: PeerId) -> Vec<PathStats>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn runtime_event_fixtures_and_schema_cover_reconnect_transitions() {
+        let retry: RuntimeEvent = serde_json::from_str(include_str!(
+            "../../../fixtures/events/reconnect.retry_scheduled.json"
+        ))
+        .expect("retry fixture should deserialize");
+        assert_eq!(retry.event_type, "reconnect.retry_scheduled");
+        assert_eq!(
+            retry
+                .details
+                .get("backoff_secs")
+                .and_then(|value| value.as_u64()),
+            Some(4)
+        );
+
+        let unsuppressed: RuntimeEvent = serde_json::from_str(include_str!(
+            "../../../fixtures/events/reconnect.unsuppressed.json"
+        ))
+        .expect("unsuppressed fixture should deserialize");
+        assert_eq!(unsuppressed.event_type, "reconnect.unsuppressed");
+        assert_eq!(unsuppressed.subject.kind, "peer");
+
+        let cleared: RuntimeEvent = serde_json::from_str(include_str!(
+            "../../../fixtures/events/reconnect.cleared.json"
+        ))
+        .expect("cleared fixture should deserialize");
+        assert_eq!(cleared.event_type, "reconnect.cleared");
+        assert_eq!(
+            cleared
+                .details
+                .get("state")
+                .and_then(|value| value.as_str()),
+            Some("backing_off")
+        );
+
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/events/runtime-event.schema.json"
+        ))
+        .expect("runtime event schema should parse");
+        let event_type_enum = &schema["properties"]["event_type"]["enum"];
+        assert!(event_type_enum
+            .as_array()
+            .expect("event type enum should be an array")
+            .iter()
+            .any(|value| value == "reconnect.unsuppressed"));
+        assert!(event_type_enum
+            .as_array()
+            .expect("event type enum should be an array")
+            .iter()
+            .any(|value| value == "reconnect.cleared"));
+        let subject_kind_enum = &schema["properties"]["subject"]["properties"]["kind"]["enum"];
+        assert!(subject_kind_enum
+            .as_array()
+            .expect("subject kind enum should be an array")
+            .iter()
+            .any(|value| value == "listener"));
+    }
+}

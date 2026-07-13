@@ -307,14 +307,17 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .reconnect_suppressions
             .write()
             .expect("reconnect suppression registry should remain writable");
-        let removed = suppressions.iter().any(|entry| {
-            &entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class
-        });
+        let removed = suppressions
+            .iter()
+            .find(|entry| {
+                &entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class
+            })
+            .cloned();
         suppressions.retain(|entry| {
             !(&entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class)
         });
         drop(suppressions);
-        if removed {
+        if let Some(removed) = removed {
             emit_runtime_event(
                 self,
                 "reconnect.unsuppressed".to_string(),
@@ -324,7 +327,9 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 },
                 json!({
                     "protocol": protocol.map(|protocol| protocol.as_str()),
-                    "class": class_label(class)
+                    "class": class_label(class),
+                    "prior_reason": removed.reason,
+                    "imposed_at_unix_secs": removed.imposed_at_unix_secs
                 }),
             );
         }
@@ -474,6 +479,7 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             existing.snapshot.max_attempts = max_attempts;
             existing.snapshot.clone()
         } else {
+            let initial_backoff = base_backoff_secs.min(max_backoff_secs);
             let snapshot = RuntimeReconnectAttempt {
                 peer: peer.clone(),
                 protocol: protocol.cloned(),
@@ -486,7 +492,7 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 reason: reason.clone(),
                 attempt_count: 1,
                 last_attempt_unix_secs: now,
-                next_attempt_unix_secs: now.saturating_add(base_backoff_secs.min(max_backoff_secs)),
+                next_attempt_unix_secs: now.saturating_add(initial_backoff),
                 max_attempts,
             };
             attempts.push(RuntimeReconnectRecord {
@@ -495,6 +501,9 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             snapshot
         };
         drop(attempts);
+        let backoff_secs = snapshot
+            .next_attempt_unix_secs
+            .saturating_sub(snapshot.last_attempt_unix_secs);
         emit_runtime_event(
             self,
             if snapshot.state == RuntimeReconnectAttemptState::Failed {
@@ -509,8 +518,10 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             json!({
                 "protocol": protocol.map(|protocol| protocol.as_str()),
                 "class": class_label(class),
+                "state": reconnect_attempt_state_label(&snapshot.state),
                 "attempt_count": snapshot.attempt_count,
                 "next_attempt_unix_secs": snapshot.next_attempt_unix_secs,
+                "backoff_secs": backoff_secs,
                 "max_attempts": snapshot.max_attempts,
                 "reason": snapshot.reason
             }),
@@ -564,6 +575,7 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 json!({
                     "protocol": protocol.map(|protocol| protocol.as_str()),
                     "class": class_label(class),
+                    "state": reconnect_attempt_state_label(&snapshot.state),
                     "attempt_count": snapshot.attempt_count,
                     "reason": outcome_reason
                 }),
@@ -991,6 +1003,13 @@ fn find_reconnect_suppression(
             &entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class
         })
         .cloned()
+}
+
+fn reconnect_attempt_state_label(state: &RuntimeReconnectAttemptState) -> &'static str {
+    match state {
+        RuntimeReconnectAttemptState::BackingOff => "backing_off",
+        RuntimeReconnectAttemptState::Failed => "failed",
+    }
 }
 
 fn runtime_event_type_for_state(state: &RuntimeSessionState) -> &'static str {
@@ -1534,12 +1553,69 @@ mod tests {
         assert_eq!(cleared.reconnect_attempt_count, 0);
 
         let events = adapter.recent_events(16).expect("events should load");
-        assert!(events
+        let retry = events
             .iter()
-            .any(|event| event.event_type == "reconnect.retry_scheduled"));
-        assert!(events
+            .find(|event| event.event_type == "reconnect.retry_scheduled")
+            .expect("retry event should exist");
+        assert_eq!(
+            retry.details.get("state").and_then(|value| value.as_str()),
+            Some("backing_off")
+        );
+        assert_eq!(
+            retry
+                .details
+                .get("backoff_secs")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        let succeeded = events
             .iter()
-            .any(|event| event.event_type == "reconnect.succeeded"));
+            .find(|event| event.event_type == "reconnect.succeeded")
+            .expect("success event should exist");
+        assert_eq!(
+            succeeded
+                .details
+                .get("state")
+                .and_then(|value| value.as_str()),
+            Some("backing_off")
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_emits_unsuppressed_event_when_reconnect_suppression_clears() {
+        let adapter = QuicTransportAdapter::default();
+        let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"reconnect-unsuppressed-peer");
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+
+        adapter
+            .suppress_reconnect(
+                &peer,
+                Some(&protocol),
+                TrafficClass::Interactive,
+                "policy denied reconnect".to_string(),
+            )
+            .expect("suppression should register");
+        adapter
+            .clear_reconnect_suppression(&peer, Some(&protocol), TrafficClass::Interactive)
+            .expect("suppression should clear");
+
+        let events = adapter.recent_events(16).expect("events should load");
+        let unsuppressed = events
+            .iter()
+            .find(|event| event.event_type == "reconnect.unsuppressed")
+            .expect("unsuppressed event should exist");
+        assert_eq!(
+            unsuppressed
+                .details
+                .get("prior_reason")
+                .and_then(|value| value.as_str()),
+            Some("policy denied reconnect")
+        );
+        assert!(unsuppressed
+            .details
+            .get("imposed_at_unix_secs")
+            .and_then(|value| value.as_u64())
+            .is_some());
     }
 
     #[tokio::test]

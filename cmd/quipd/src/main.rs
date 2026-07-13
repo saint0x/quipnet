@@ -2503,6 +2503,7 @@ fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition
 mod tests {
     use super::*;
     use daemonapi::{AuthoritySyncResult, RuntimeStatusResult};
+    use fabric::{KeyAlgorithm, PeerId};
     use quic::QuicTransportAdapter;
     use serde_json::json;
 
@@ -2985,6 +2986,96 @@ mod tests {
             .iter()
             .any(|event| event.event_type == "authority.policy_enforced"));
         let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn runtime_events_response_preserves_event_truth_and_listener_subjects() {
+        let state_path = unique_temp_path("quipd-runtime-events");
+        let control = LocalControlPlane::new(DaemonConfig::new("runtime-events", &state_path));
+        let transport = QuicTransportAdapter::default();
+        transport
+            .record_runtime_event(
+                "reconnect.unsuppressed",
+                fabric::RuntimeEventSubject {
+                    kind: "listener".to_string(),
+                    id: "listener-1".to_string(),
+                },
+                json!({
+                    "protocol": "/quicnet/control/1",
+                    "class": "interactive",
+                    "prior_reason": "policy denied reconnect"
+                }),
+            )
+            .expect("runtime event should record");
+
+        let response = runtime_events_response(
+            &control,
+            &transport,
+            RequestEnvelope {
+                request_id: "req-runtime-events".to_string(),
+                operation: "runtime.events.list".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({ "limit": 8 }),
+            },
+        );
+
+        assert!(response.ok);
+        let result: RuntimeEventsListResult =
+            serde_json::from_value(response.result.expect("events result should exist"))
+                .expect("events result should deserialize");
+        assert_eq!(result.truth_kind, "runtime");
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0].truth_kind, "runtime");
+        assert_eq!(result.events[0].subject_kind, "listener");
+        assert_eq!(result.events[0].event_type, "reconnect.unsuppressed");
+        assert_eq!(
+            result.events[0]
+                .details
+                .get("prior_reason")
+                .and_then(|value| value.as_str()),
+            Some("policy denied reconnect")
+        );
+    }
+
+    #[test]
+    fn runtime_health_response_preserves_authority_status_fields() {
+        let state_path = unique_temp_path("quipd-runtime-health");
+        let control = LocalControlPlane::new(DaemonConfig::new("runtime-health", &state_path));
+        let transport = QuicTransportAdapter::default();
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol should parse");
+        transport
+            .suppress_reconnect(
+                &PeerId::from_public_key(KeyAlgorithm::Ed25519, b"health-suppressed-peer"),
+                Some(&protocol),
+                TrafficClass::Interactive,
+                "membership revoked".to_string(),
+            )
+            .expect("suppression should register");
+
+        let response = runtime_health_response(
+            &control,
+            &transport,
+            RequestEnvelope {
+                request_id: "req-runtime-health".to_string(),
+                operation: "runtime.health".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: RuntimeHealthResult =
+            serde_json::from_value(response.result.expect("health result should exist"))
+                .expect("health result should deserialize");
+        assert_eq!(result.truth_kind, "runtime");
+        assert_eq!(result.authority_subject_status, "matched");
+        assert!(result.authority_deny_reason.is_none());
+        assert_eq!(result.reconnect_state, "suppressed");
+        assert_eq!(result.reconnect_suppression_count, 1);
     }
 
     fn test_args(state_path: &str) -> Args {

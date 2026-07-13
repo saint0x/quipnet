@@ -20,17 +20,47 @@
                   "event_id",
                   "event_type",
                   "emitted_at",
+                  "truth_kind",
                   "subject_kind",
                   "subject_id",
                   "details"
                 ],
                 "properties": {
                   "event_id": { "type": "string", "minLength": 1 },
-                  "event_type": { "type": "string", "minLength": 1 },
+                  "event_type": {
+                    "type": "string",
+                    "enum": [
+                      "session.created",
+                      "session.state_changed",
+                      "session.closing",
+                      "session.closed",
+                      "session.failed",
+                      "path.selected",
+                      "path.degraded",
+                      "path.migration_started",
+                      "path.migration_completed",
+                      "path.failed",
+                      "path.suppressed",
+                      "reconnect.started",
+                      "reconnect.retry_scheduled",
+                      "reconnect.succeeded",
+                      "reconnect.suppressed",
+                      "reconnect.unsuppressed",
+                      "reconnect.cleared",
+                      "reconnect.failed",
+                      "authority.sync_started",
+                      "authority.sync_completed",
+                      "authority.sync_failed",
+                      "authority.reevaluation_started",
+                      "authority.reevaluation_completed",
+                      "authority.policy_enforced"
+                    ]
+                  },
                   "emitted_at": { "type": "string", "format": "date-time" },
+                  "truth_kind": { "type": "string", "const": "runtime" },
                   "subject_kind": {
                     "type": "string",
-                    "enum": ["session", "peer", "authority", "path", "runtime"]
+                    "enum": ["session", "peer", "authority", "path", "listener", "runtime"]
                   },
                   "subject_id": { "type": "string", "minLength": 1 },
                   "details": { "type": "object" }

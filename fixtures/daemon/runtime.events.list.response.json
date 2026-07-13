@@ -6,14 +6,15 @@
     "events": [
       {
         "event_id": "evt-0001",
-        "event_type": "session.state_changed",
+        "event_type": "reconnect.unsuppressed",
         "emitted_at": "2026-07-13T15:06:00Z",
-        "subject_kind": "session",
-        "subject_id": "sess-0100",
+        "truth_kind": "runtime",
+        "subject_kind": "listener",
+        "subject_id": "listener-0100",
         "details": {
-          "peer_id": "peer-003",
-          "prior_state": "connecting",
-          "next_state": "active"
+          "protocol": "/quicnet/control/1",
+          "class": "interactive",
+          "prior_reason": "policy denied reconnect"
         }
       }
     ]

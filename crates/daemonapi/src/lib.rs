@@ -552,6 +552,31 @@ mod tests {
         .expect("path fixture should deserialize");
         assert!(paths.ok);
 
+        let events: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/runtime.events.list.response.json"
+        ))
+        .expect("events fixture should deserialize");
+        assert!(events.ok);
+
+        let health: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/runtime.health.response.json"
+        ))
+        .expect("health fixture should deserialize");
+        assert!(health.ok);
+        let health_result: RuntimeHealthResult =
+            serde_json::from_value(health.result.clone().expect("health result should exist"))
+                .expect("health result should deserialize");
+        assert_eq!(health_result.authority_subject_status, "matched");
+        assert_eq!(
+            health_result.authority_deny_reason.as_deref(),
+            Some("membership revoked")
+        );
+        let events_result: RuntimeEventsListResult =
+            serde_json::from_value(events.result.clone().expect("events result should exist"))
+                .expect("events result should deserialize");
+        assert_eq!(events_result.events[0].truth_kind, "runtime");
+        assert_eq!(events_result.events[0].subject_kind, "listener");
+
         let identity_show: ResponseEnvelope = serde_json::from_str(include_str!(
             "../../../fixtures/daemon/identity.show.response.json"
         ))
@@ -609,6 +634,40 @@ mod tests {
             path_schema["allOf"][1]["properties"]["result"]["properties"]["paths"]["items"]
                 ["properties"]
                 .get("decision_reason")
+                .is_some()
+        );
+
+        let events_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/runtime.events.list.response.schema.json"
+        ))
+        .expect("events schema should parse");
+        let event_type_enum = &events_schema["allOf"][1]["properties"]["result"]["properties"]
+            ["events"]["items"]["properties"]["event_type"]["enum"];
+        assert!(event_type_enum
+            .as_array()
+            .expect("event type enum should be an array")
+            .iter()
+            .any(|value| value == "reconnect.unsuppressed"));
+        let event_subject_enum = &events_schema["allOf"][1]["properties"]["result"]["properties"]
+            ["events"]["items"]["properties"]["subject_kind"]["enum"];
+        assert!(event_subject_enum
+            .as_array()
+            .expect("event subject enum should be an array")
+            .iter()
+            .any(|value| value == "listener"));
+
+        let health_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/runtime.health.response.schema.json"
+        ))
+        .expect("health schema should parse");
+        assert!(
+            health_schema["allOf"][1]["properties"]["result"]["properties"]
+                .get("authority_subject_status")
+                .is_some()
+        );
+        assert!(
+            health_schema["allOf"][1]["properties"]["result"]["properties"]
+                .get("authority_deny_reason")
                 .is_some()
         );
 

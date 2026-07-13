@@ -113,6 +113,17 @@
       "focus": ["path_migration", "runtime_events", "path_state"]
     },
     {
+      "id": "runtime-event-contract",
+      "priority": 1,
+      "description": "Runtime event fixtures, daemon responses, and emitted reconnect transitions stay aligned.",
+      "checks": [
+        "runtime_event_schema_matches_emission",
+        "reconnect_unsuppressed_visible",
+        "daemon_runtime_events_preserve_truth_kind"
+      ],
+      "focus": ["runtime_events", "reconnect", "operator_surface"]
+    },
+    {
       "id": "reconnect-after-drop",
       "priority": 1,
       "description": "Reconnect after drop follows daemon-owned policy with deterministic retry behavior.",

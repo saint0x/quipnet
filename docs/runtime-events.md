@@ -73,6 +73,8 @@ Useful details:
 - `reconnect.retry_scheduled`
 - `reconnect.succeeded`
 - `reconnect.suppressed`
+- `reconnect.unsuppressed`
+- `reconnect.cleared`
 - `reconnect.failed`
 
 Useful details:

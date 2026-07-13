@@ -14,7 +14,43 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
+      "args": ["test", "-p", "quic", "adapter_emits_unsuppressed_event_when_reconnect_suppression_clears"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "transport", "runtime_event_fixtures_and_schema_cover_reconnect_transitions"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
       "args": ["test", "-p", "fabric", "runtime_health_reports_listener_and_suppression_state"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quipd", "runtime_events_response_preserves_event_truth_and_listener_subjects"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "daemonapi", "daemon_fixtures_deserialize_and_schemas_expose_new_fields"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",

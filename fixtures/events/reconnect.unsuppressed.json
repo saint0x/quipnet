@@ -1,0 +1,16 @@
+{
+  "event_id": "evt-1720000123000000002",
+  "event_type": "reconnect.unsuppressed",
+  "emitted_at": "2026-07-13T07:54:31Z",
+  "truth_kind": "runtime",
+  "subject": {
+    "kind": "peer",
+    "id": "ed25519:reconnect-peer"
+  },
+  "details": {
+    "protocol": "/quicnet/control/1",
+    "class": "interactive",
+    "prior_reason": "policy denied reconnect",
+    "imposed_at_unix_secs": 1720000120
+  }
+}

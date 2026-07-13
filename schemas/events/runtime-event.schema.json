@@ -35,6 +35,8 @@
         "reconnect.retry_scheduled",
         "reconnect.succeeded",
         "reconnect.suppressed",
+        "reconnect.unsuppressed",
+        "reconnect.cleared",
         "reconnect.failed",
         "authority.sync_started",
         "authority.sync_completed",

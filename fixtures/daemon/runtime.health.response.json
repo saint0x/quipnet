@@ -5,6 +5,8 @@
     "truth_kind": "runtime",
     "daemon_readiness": "suppressed",
     "authority_sync_health": "ready",
+    "authority_subject_status": "matched",
+    "authority_deny_reason": "membership revoked",
     "runtime_registry_health": "ready",
     "path_manager_health": "ready",
     "reconnect_subsystem_health": "suppressed",

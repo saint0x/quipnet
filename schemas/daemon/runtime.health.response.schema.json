@@ -12,6 +12,8 @@
             "truth_kind",
             "daemon_readiness",
             "authority_sync_health",
+            "authority_subject_status",
+            "authority_deny_reason",
             "runtime_registry_health",
             "path_manager_health",
             "reconnect_subsystem_health",
@@ -32,6 +34,13 @@
             "authority_sync_health": {
               "type": "string",
               "enum": ["ready", "degraded", "failed", "suppressed"]
+            },
+            "authority_subject_status": {
+              "type": "string",
+              "enum": ["matched", "mismatched"]
+            },
+            "authority_deny_reason": {
+              "type": ["string", "null"]
             },
             "runtime_registry_health": {
               "type": "string",

@@ -68,6 +68,15 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "authority_reevaluation_clears_runtime_suppression_and_restores_listener"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
       "args": ["test", "-p", "quipd", "authority_sync_response_triggers_live_reevaluation_when_grants_are_removed"],
       "exit_code": 0,
       "stdout": "",

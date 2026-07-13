@@ -4550,6 +4550,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authority_reevaluation_clears_runtime_suppression_and_restores_listener() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-authority-reevaluation-restore-state");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([121_u8; 32]);
+        let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
+            "authority-reevaluation-restore-prod",
+            &state_path,
+            120,
+            121,
+            b"authority-reevaluation-restore-runtime",
+            b"authority-reevaluation-restore-target",
+        )
+        .await;
+        let protocol = session.protocol.clone().expect("protocol should exist");
+        let _listener = transport
+            .listen(BindSpec {
+                protocol: protocol.clone(),
+                advertise: true,
+            })
+            .await
+            .expect("listener should register");
+        transport
+            .suppress_reconnect(
+                &session.peer,
+                Some(&protocol),
+                session.class,
+                "temporary policy denial".to_string(),
+            )
+            .expect("suppression should register");
+        let listener_id = transport
+            .active_listeners()
+            .expect("listener lookup should succeed")
+            .into_iter()
+            .find(|entry| entry.protocol == protocol)
+            .expect("listener snapshot should exist")
+            .listener_id;
+        let _ = transport
+            .update_listener_state(
+                &listener_id,
+                RuntimeListenerState::Suppressed,
+                Some("temporary policy denial".to_string()),
+            )
+            .expect("listener update should succeed");
+
+        let report = control
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
+            .await
+            .expect("authority reevaluation should succeed");
+
+        assert_eq!(report.reevaluated_sessions, 1);
+        assert_eq!(report.reconnect_suppressions_added, 0);
+        assert_eq!(report.reconnect_suppressions_cleared, 1);
+        assert_eq!(report.reevaluated_listeners, 1);
+        assert_eq!(report.restored_listeners, 1);
+        assert_eq!(report.suppressed_listeners, 0);
+        assert!(transport
+            .reconnect_suppressions()
+            .expect("suppression lookup should succeed")
+            .is_empty());
+        let listeners = transport
+            .active_listeners()
+            .expect("listener lookup should succeed");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].state, RuntimeListenerState::Active);
+        assert!(listeners[0].state_reason.is_none());
+        let events = transport.recent_events(32).expect("events should load");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "reconnect.unsuppressed"));
+        assert!(events.iter().any(|event| {
+            event.event_type == "authority.reevaluation_completed"
+                && event
+                    .details
+                    .get("reconnect_suppressions_cleared")
+                    .and_then(|value| value.as_u64())
+                    == Some(1)
+                && event
+                    .details
+                    .get("restored_listeners")
+                    .and_then(|value| value.as_u64())
+                    == Some(1)
+        }));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
     async fn authority_reevaluation_closes_subject_mismatch_sessions() {
         let _guard = relay_test_lock();
         let state_path = unique_state_path("quicnet-authority-reevaluation-subject-mismatch");
