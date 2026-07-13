@@ -143,6 +143,14 @@ fn direct_session_snapshot(
     adapter: &QuicTransportAdapter,
     route: &RoutePlan,
 ) -> Result<SessionSnapshot, TransportError> {
+    let local_identity = adapter.local_identity.as_ref().ok_or_else(|| {
+        TransportError::InvalidRoute("direct route requires local identity".into())
+    })?;
+    if local_identity.peer_id() != route.local_peer {
+        return Err(TransportError::InvalidRoute(
+            "local identity peer does not match route local peer".into(),
+        ));
+    }
     let remote_endpoint = route
         .remote_endpoints
         .first()
@@ -311,12 +319,15 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_returns_connection_metadata() {
-        let adapter = QuicTransportAdapter::default();
+        let local_identity = IdentityKeypair::from_secret_bytes([60_u8; 32]);
+        let local = local_identity.peer_id();
+        let adapter =
+            QuicTransportAdapter::with_identity(NetworkId::derive("direct-test"), local_identity);
         let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer");
         let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
         let handle = adapter
             .connect(RoutePlan {
-                local_peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"local"),
+                local_peer: local,
                 peer: peer.clone(),
                 protocol: Some(protocol),
                 class: TrafficClass::Control,
@@ -331,6 +342,30 @@ mod tests {
         assert_eq!(handle.session.peer, peer);
         assert!(handle.session.migration_capable);
         assert!(handle.session.relay_peer.is_none());
+    }
+
+    #[tokio::test]
+    async fn adapter_rejects_direct_route_when_local_identity_mismatches() {
+        let local_identity = IdentityKeypair::from_secret_bytes([59_u8; 32]);
+        let adapter =
+            QuicTransportAdapter::with_identity(NetworkId::derive("direct-test"), local_identity);
+        let error = adapter
+            .connect(RoutePlan {
+                local_peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"other-local"),
+                peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer"),
+                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                class: TrafficClass::Control,
+                path_kind: PathKind::DirectUdp,
+                source: RouteSource::Observed,
+                remote_endpoints: vec!["quic://198.51.100.10:8443".to_string()],
+                relay: None,
+            })
+            .await
+            .expect_err("mismatched direct identity should fail");
+
+        assert!(error
+            .to_string()
+            .contains("local identity peer does not match route local peer"));
     }
 
     #[tokio::test]

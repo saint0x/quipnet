@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crypto::IdentityKeypair;
 use control::{AuthorityArtifactSnapshot, ControlClient};
 use membership::{CapabilityGrant, MembershipCertificate, RevocationRecord, RevocationTarget};
 use relaywire::{RelayAnnouncement, RelayMap};
@@ -721,8 +722,56 @@ impl LocalControlPlane {
         }
     }
 
+    pub fn ensure_state_for_local_identity(
+        &self,
+        local_identity: &IdentityKeypair,
+    ) -> Result<DaemonState, DaemonStateError> {
+        if self.config.state_path.exists() {
+            self.ensure_state()
+        } else {
+            let mut state = self_identity_daemon_state(
+                &self.config.network,
+                self.config.roles.clone(),
+                local_identity,
+            );
+            state.path_candidates = merged_path_candidates(&state);
+            state.save(&self.config.state_path)?;
+            Ok(state)
+        }
+    }
+
+    pub fn ensure_identity_bound_state(
+        &self,
+        local_identity: &IdentityKeypair,
+    ) -> Result<DaemonState, DaemonStateError> {
+        let state = self.ensure_state_for_local_identity(local_identity)?;
+        let expected = local_identity.peer_id();
+        if state.local_peer_id != expected {
+            return Err(DaemonStateError::InvalidSession(format!(
+                "state local peer {} does not match runtime identity {}",
+                state.local_peer_id, expected
+            )));
+        }
+        if state.membership.subject_peer_id != expected {
+            return Err(DaemonStateError::InvalidSession(format!(
+                "membership subject peer {} does not match runtime identity {}",
+                state.membership.subject_peer_id, expected
+            )));
+        }
+        Ok(state)
+    }
+
     pub fn refresh_and_persist(&self) -> Result<DaemonState, DaemonStateError> {
         let state = self.ensure_state()?;
+        state.save(&self.config.state_path)?;
+        Ok(state)
+    }
+
+    pub fn refresh_and_persist_for_local_identity(
+        &self,
+        local_identity: &IdentityKeypair,
+    ) -> Result<DaemonState, DaemonStateError> {
+        let state = self.ensure_state_for_local_identity(local_identity)?;
         state.save(&self.config.state_path)?;
         Ok(state)
     }
@@ -1081,6 +1130,28 @@ fn load_authority_snapshot(
 
 fn authority_client(network: &str, origin: &str) -> ControlClient {
     ControlClient::from_origin(NetworkId::derive(network), origin)
+}
+
+fn self_identity_daemon_state(
+    network: &str,
+    roles: Vec<DaemonRole>,
+    local_identity: &IdentityKeypair,
+) -> DaemonState {
+    let mut state = fixture_daemon_state(network);
+    let local_peer_id = local_identity.peer_id();
+    state.roles = roles;
+    state.local_peer_id = local_peer_id.clone();
+    state.membership = MembershipCertificate::issue(
+        local_identity,
+        NetworkId::derive(network),
+        local_peer_id,
+        1_720_000_000,
+        1_820_000_000,
+        vec!["member".to_string()],
+    );
+    state.denied_peers = denied_peers(&state.membership, &state.revocations);
+    state.path_candidates = merged_path_candidates(&state);
+    state
 }
 
 fn hex_session_id(session_id: &[u8; 16]) -> String {
@@ -1904,6 +1975,39 @@ mod tests {
 
         let loaded = DaemonState::load(&temp).expect("state should be readable");
         assert_eq!(loaded.network, "dev");
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn ensure_state_for_local_identity_bootstraps_matching_peer() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-bound-state.json");
+        let control = LocalControlPlane::new(DaemonConfig::new("dev", &temp));
+        let local_identity = crypto::IdentityKeypair::from_secret_bytes([88_u8; 32]);
+
+        let state = control
+            .ensure_state_for_local_identity(&local_identity)
+            .expect("state should bootstrap from runtime identity");
+
+        assert_eq!(state.local_peer_id, local_identity.peer_id());
+        assert_eq!(state.membership.subject_peer_id, local_identity.peer_id());
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn ensure_identity_bound_state_rejects_mismatched_runtime_identity() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-bound-mismatch.json");
+        let control = LocalControlPlane::new(DaemonConfig::new("dev", &temp));
+        let state = fixture_daemon_state("dev");
+        state.save(&temp).expect("fixture state should persist");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([89_u8; 32]);
+
+        let error = control
+            .ensure_identity_bound_state(&runtime_identity)
+            .expect_err("mismatched runtime identity should fail");
+
+        assert!(error
+            .to_string()
+            .contains("does not match runtime identity"));
         let _ = std::fs::remove_file(temp);
     }
 

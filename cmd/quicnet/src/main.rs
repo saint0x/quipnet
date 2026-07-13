@@ -314,14 +314,15 @@ async fn run() -> Result<(), Box<dyn Error>> {
             peer,
             class,
         } => {
-            let state = control.ensure_state()?;
+            let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
+            let state = control.ensure_identity_bound_state(&identity)?;
             let target = resolve_peer(peer.as_deref(), &state)?;
             let protocol =
                 ProtocolId::new(protocol).map_err(|error| usage_error(error.to_string()))?;
             let class = parse_class(&class);
             let transport = QuicTransportAdapter::with_identity(
                 fabric::NetworkId::derive(&cli.network),
-                load_identity(&cli.identity_path, &cli.identity_passphrase_env)?,
+                identity,
             );
             let session = control
                 .realize_best_path(&target, &protocol, class, &transport)
@@ -395,11 +396,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
             println!("closed session_id={}", hex_session_id(&session_id));
         }
         Command::SessionUpgrade { session } => {
+            let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
+            let _state = control.ensure_identity_bound_state(&identity)?;
             let sessions = control.session_snapshots()?;
             let session_id = resolve_session_id(session.as_deref(), &sessions)?;
             let transport = QuicTransportAdapter::with_identity(
                 fabric::NetworkId::derive(&cli.network),
-                load_identity(&cli.identity_path, &cli.identity_passphrase_env)?,
+                identity,
             );
             let session = control.upgrade_session(&session_id, &transport).await?;
             println!(
@@ -431,9 +434,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
             );
         }
         Command::SessionReconcile => {
+            let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
+            let _state = control.ensure_identity_bound_state(&identity)?;
             let transport = QuicTransportAdapter::with_identity(
                 fabric::NetworkId::derive(&cli.network),
-                load_identity(&cli.identity_path, &cli.identity_passphrase_env)?,
+                identity,
             );
             let report = control.reconcile_sessions(&transport).await?;
             println!(

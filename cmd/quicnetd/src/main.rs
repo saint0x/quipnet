@@ -125,12 +125,14 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn Error>> {
     observability::init_tracing("quicnetd");
     let args = Args::parse();
+    let local_identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env)?;
     let control = LocalControlPlane::new(DaemonConfig::new(
         args.network.clone(),
         args.state_path.clone(),
     ));
 
-    initialize_state(&args, &control)?;
+    initialize_state(&args, &control, &local_identity)?;
+    control.ensure_identity_bound_state(&local_identity)?;
     let mut trigger_monitor = DaemonTriggerMonitor::new(&args);
     let mut trigger = if args.force_network_reprobe {
         CycleTrigger::NetworkChangeRequested
@@ -139,7 +141,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     };
 
     loop {
-        let report = run_cycle(&args, &control, trigger.clone()).await?;
+        let report = run_cycle(&args, &control, &local_identity, trigger.clone()).await?;
         emit_cycle_report(&args, &report);
 
         if args.one_shot {
@@ -168,6 +170,7 @@ enum WaitOutcome {
 fn initialize_state(
     args: &Args,
     control: &LocalControlPlane,
+    local_identity: &IdentityKeypair,
 ) -> Result<fabric::DaemonState, fabric::DaemonStateError> {
     let state = match (
         args.authority_snapshot.as_deref(),
@@ -191,7 +194,7 @@ fn initialize_state(
                 control.seed_from_authority_origin(origin, args.authority_subject.as_deref())
             }
         }
-        (None, None) => control.refresh_and_persist(),
+        (None, None) => control.refresh_and_persist_for_local_identity(local_identity),
         (Some(_), Some(_)) => Err(fabric::DaemonStateError::InvalidSession(
             "only one of --authority-snapshot or --authority-origin may be supplied".to_string(),
         )),
@@ -213,6 +216,7 @@ fn initialize_state(
 fn refresh_state(
     args: &Args,
     control: &LocalControlPlane,
+    local_identity: &IdentityKeypair,
 ) -> Result<fabric::DaemonState, fabric::DaemonStateError> {
     let state = match (
         args.sync,
@@ -225,7 +229,7 @@ fn refresh_state(
         (true, None, Some(origin)) => control
             .sync_authority_origin(origin, args.authority_subject.as_deref())
             .map(|(state, _)| state),
-        _ => control.refresh_and_persist(),
+        _ => control.refresh_and_persist_for_local_identity(local_identity),
     }?;
 
     if args.revocation_sync {
@@ -244,10 +248,11 @@ fn refresh_state(
 async fn run_cycle(
     args: &Args,
     control: &LocalControlPlane,
+    local_identity: &IdentityKeypair,
     trigger: CycleTrigger,
 ) -> Result<DaemonCycleReport, fabric::DaemonStateError> {
     let (preparation, reprobe_report, mut state) =
-        prepare_state_for_trigger(args, control, &trigger)?;
+        prepare_state_for_trigger(args, control, local_identity, &trigger)?;
     let reconcile_report = if args.disable_reconcile {
         None
     } else {
@@ -260,7 +265,7 @@ async fn run_cycle(
                 entries: Vec::new(),
             })
         } else {
-            let transport = daemon_transport(args)
+            let transport = daemon_transport(args, local_identity)
                 .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
             let report = control.reconcile_sessions(&transport).await?;
             state = control.ensure_state()?;
@@ -269,7 +274,7 @@ async fn run_cycle(
     };
     let (active_session, connect_status) = match args.connect_protocol.as_deref() {
         Some(protocol) => {
-            let transport = daemon_transport(args)
+            let transport = daemon_transport(args, local_identity)
                 .map_err(|error| fabric::DaemonStateError::InvalidSession(error.to_string()))?;
             match ensure_target_session(args, control, &state, transport, protocol).await {
                 Ok(Some(session)) => {
@@ -420,17 +425,20 @@ fn parse_class(value: &str) -> TrafficClass {
     }
 }
 
-fn daemon_transport(args: &Args) -> Result<QuicTransportAdapter, Box<dyn Error>> {
-    let identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env)?;
+fn daemon_transport(
+    args: &Args,
+    local_identity: &IdentityKeypair,
+) -> Result<QuicTransportAdapter, Box<dyn Error>> {
     Ok(QuicTransportAdapter::with_identity(
         fabric::NetworkId::derive(&args.network),
-        identity,
+        local_identity.clone(),
     ))
 }
 
 fn prepare_state_for_trigger(
     args: &Args,
     control: &LocalControlPlane,
+    local_identity: &IdentityKeypair,
     trigger: &CycleTrigger,
 ) -> Result<
     (
@@ -467,7 +475,7 @@ fn prepare_state_for_trigger(
         CycleTrigger::Startup | CycleTrigger::IntervalElapsed => Ok((
             CyclePreparation::RefreshState,
             None,
-            refresh_state(args, control)?,
+            refresh_state(args, control, local_identity)?,
         )),
     }
 }
@@ -663,10 +671,16 @@ mod tests {
         let state = fabric::fixture_daemon_state("prepare-state-change");
         state.save(&state_path).expect("state should persist");
         let args = test_args(state_path.to_string_lossy().as_ref());
+        let local_identity = IdentityKeypair::from_secret_bytes([91_u8; 32]);
 
         let (preparation, reprobe_report, prepared_state) =
-            prepare_state_for_trigger(&args, &control, &CycleTrigger::StateChanged)
-                .expect("state change preparation should succeed");
+            prepare_state_for_trigger(
+                &args,
+                &control,
+                &local_identity,
+                &CycleTrigger::StateChanged,
+            )
+            .expect("state change preparation should succeed");
 
         assert_eq!(preparation, CyclePreparation::ReloadState);
         assert!(reprobe_report.is_none());
@@ -685,10 +699,16 @@ mod tests {
         state.save(&state_path).expect("state should persist");
         let mut args = test_args(state_path.to_string_lossy().as_ref());
         args.force_network_reprobe = true;
+        let local_identity = IdentityKeypair::from_secret_bytes([92_u8; 32]);
 
         let (preparation, reprobe_report, prepared_state) =
-            prepare_state_for_trigger(&args, &control, &CycleTrigger::NetworkChangeRequested)
-                .expect("network change preparation should succeed");
+            prepare_state_for_trigger(
+                &args,
+                &control,
+                &local_identity,
+                &CycleTrigger::NetworkChangeRequested,
+            )
+            .expect("network change preparation should succeed");
 
         assert_eq!(preparation, CyclePreparation::ReprobeNetwork);
         assert!(reprobe_report.is_some());
