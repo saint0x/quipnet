@@ -88,6 +88,7 @@ pub struct DaemonEndpointDiscovery {
     pub network: String,
     pub state_path: String,
     pub identity_path: String,
+    pub runtime_instance_id: String,
     pub pid: u32,
     pub started_at_unix_secs: u64,
 }

@@ -50,6 +50,7 @@ pub struct QuicTransportAdapter {
     pub implementation: &'static str,
     pub supports_datagrams: bool,
     pub supports_path_migration: bool,
+    pub runtime_instance_id: String,
     pub network_id: Option<NetworkId>,
     pub local_identity: Option<IdentityKeypair>,
     relay_control: Arc<dyn RelayControl>,
@@ -66,6 +67,7 @@ impl Default for QuicTransportAdapter {
             implementation: "adapter-placeholder",
             supports_datagrams: true,
             supports_path_migration: true,
+            runtime_instance_id: random_runtime_instance_id(),
             network_id: None,
             local_identity: None,
             relay_control: Arc::new(HttpRelayControl),
@@ -97,6 +99,10 @@ impl QuicTransportAdapter {
             .read()
             .expect("runtime session registry should remain readable")
             .contains_key(session_id)
+    }
+
+    pub fn runtime_instance_id(&self) -> &str {
+        &self.runtime_instance_id
     }
 }
 
@@ -149,12 +155,13 @@ impl SecureTransport for QuicTransportAdapter {
             self,
             RuntimeListenerRecord {
                 snapshot: RuntimeListenerSnapshot {
-                    listener_id: runtime_listener_id(&bind),
+                    listener_id: runtime_listener_id(&self.runtime_instance_id, &bind),
                     transport: "quic".to_string(),
                     bind_summary: format!(
-                        "protocol={} advertise={}",
+                        "protocol={} advertise={} runtime_instance={}",
                         bind.protocol.as_str(),
-                        bind.advertise
+                        bind.advertise,
+                        self.runtime_instance_id
                     ),
                     protocol: bind.protocol,
                     advertise: bind.advertise,
@@ -683,9 +690,10 @@ fn direct_session_snapshot(
         .cloned()
         .ok_or_else(|| TransportError::NoRoute(route.peer.clone()))?;
     let now = current_unix_secs();
+    let session_id = logical_session_id(&adapter.runtime_instance_id, route);
     Ok(SessionSnapshot {
-        session_id: logical_session_id(route),
-        transport_session_id: logical_session_id(route),
+        session_id,
+        transport_session_id: session_id,
         relay_attempt_id: None,
         peer: route.peer.clone(),
         protocol: route.protocol.clone(),
@@ -764,8 +772,9 @@ fn relay_session_snapshot(
         .or_else(|| route.remote_endpoints.first().cloned())
         .unwrap_or_else(|| route.peer.to_string());
     let now = current_unix_secs();
+    let session_id = logical_session_id(&adapter.runtime_instance_id, route);
     Ok(SessionSnapshot {
-        session_id: logical_session_id(route),
+        session_id,
         transport_session_id: accepted.session_id,
         relay_attempt_id: Some(accepted.attempt_id),
         peer: route.peer.clone(),
@@ -793,8 +802,9 @@ fn random_attempt_id() -> [u8; 16] {
     attempt_id
 }
 
-fn logical_session_id(route: &RoutePlan) -> [u8; 16] {
+fn logical_session_id(runtime_instance_id: &str, route: &RoutePlan) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(runtime_instance_id.as_bytes());
     hasher.update(route.local_peer.as_bytes());
     hasher.update(route.peer.as_bytes());
     hasher.update(route.class_string().as_bytes());
@@ -805,6 +815,15 @@ fn logical_session_id(route: &RoutePlan) -> [u8; 16] {
     let mut session_id = [0_u8; 16];
     session_id.copy_from_slice(&digest.as_bytes()[..16]);
     session_id
+}
+
+fn random_runtime_instance_id() -> String {
+    let mut runtime_instance_id = [0_u8; 16];
+    OsRng.fill_bytes(&mut runtime_instance_id);
+    runtime_instance_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn upsert_runtime_session(
@@ -1027,8 +1046,9 @@ fn hex_session_id(session_id: &[u8; 16]) -> String {
         .collect::<String>()
 }
 
-fn runtime_listener_id(bind: &BindSpec) -> String {
+fn runtime_listener_id(runtime_instance_id: &str, bind: &BindSpec) -> String {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(runtime_instance_id.as_bytes());
     hasher.update(bind.protocol.as_str().as_bytes());
     hasher.update(if bind.advertise { b"1" } else { b"0" });
     hasher.update(current_unix_nanos().to_string().as_bytes());
@@ -1198,6 +1218,77 @@ mod tests {
         assert_eq!(listeners[0].transport, "quic");
         assert_eq!(listeners[0].protocol.as_str(), "/quicnet/relay/1");
         assert_eq!(listeners[0].state, RuntimeListenerState::Active);
+        assert!(listeners[0]
+            .bind_summary
+            .contains(adapter.runtime_instance_id()));
+    }
+
+    #[tokio::test]
+    async fn adapter_scopes_session_ids_to_runtime_instance() {
+        let local_identity = IdentityKeypair::from_secret_bytes([65_u8; 32]);
+        let local = local_identity.peer_id();
+        let adapter_a = QuicTransportAdapter::with_identity(
+            NetworkId::derive("restart-test"),
+            local_identity.clone(),
+        );
+        let adapter_b =
+            QuicTransportAdapter::with_identity(NetworkId::derive("restart-test"), local_identity);
+        let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"restart-peer");
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let route = RoutePlan {
+            local_peer: local,
+            peer,
+            protocol: Some(protocol),
+            class: TrafficClass::Interactive,
+            path_kind: PathKind::DirectUdp,
+            source: RouteSource::Observed,
+            remote_endpoints: vec!["quic://198.51.100.40:8443".to_string()],
+            relay: None,
+        };
+
+        let session_a = adapter_a.connect(route.clone()).await.unwrap().session;
+        let session_b = adapter_b.connect(route).await.unwrap().session;
+
+        assert_ne!(
+            adapter_a.runtime_instance_id(),
+            adapter_b.runtime_instance_id()
+        );
+        assert_ne!(session_a.session_id, session_b.session_id);
+        assert_ne!(
+            session_a.transport_session_id,
+            session_b.transport_session_id
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_scopes_listener_ids_to_runtime_instance() {
+        let adapter_a = QuicTransportAdapter::default();
+        let adapter_b = QuicTransportAdapter::default();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
+
+        adapter_a
+            .listen(BindSpec {
+                protocol: protocol.clone(),
+                advertise: true,
+            })
+            .await
+            .expect("listener should register");
+        adapter_b
+            .listen(BindSpec {
+                protocol,
+                advertise: true,
+            })
+            .await
+            .expect("listener should register");
+
+        let listener_a = adapter_a.active_listeners().unwrap().pop().unwrap();
+        let listener_b = adapter_b.active_listeners().unwrap().pop().unwrap();
+
+        assert_ne!(
+            adapter_a.runtime_instance_id(),
+            adapter_b.runtime_instance_id()
+        );
+        assert_ne!(listener_a.listener_id, listener_b.listener_id);
     }
 
     #[tokio::test]

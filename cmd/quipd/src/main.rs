@@ -648,6 +648,7 @@ fn start_control_server(
             network: args.network.clone(),
             state_path: args.state_path.clone(),
             identity_path: args.identity_path.clone(),
+            runtime_instance_id: transport.runtime_instance_id().to_string(),
             pid: std::process::id(),
             started_at_unix_secs: current_unix_secs(),
         },
@@ -1779,6 +1780,33 @@ mod tests {
         );
         let _ = std::fs::remove_file(state_path);
         let _ = std::fs::remove_file(trigger_path);
+    }
+
+    #[test]
+    fn write_control_discovery_persists_runtime_instance_id() {
+        let discovery_path = unique_temp_path("quipd-control-discovery");
+        write_control_discovery(
+            &discovery_path,
+            DaemonEndpointDiscovery {
+                endpoint: "http://127.0.0.1:4000/rpc".to_string(),
+                network: "test-network".to_string(),
+                state_path: "/tmp/state.json".to_string(),
+                identity_path: "/tmp/identity.json".to_string(),
+                runtime_instance_id: "runtime-instance-123".to_string(),
+                pid: 42,
+                started_at_unix_secs: 1_726_000_000,
+            },
+        )
+        .expect("discovery should persist");
+
+        let persisted: DaemonEndpointDiscovery = serde_json::from_slice(
+            &std::fs::read(&discovery_path).expect("discovery file should be readable"),
+        )
+        .expect("discovery JSON should deserialize");
+
+        assert_eq!(persisted.runtime_instance_id, "runtime-instance-123");
+        assert_eq!(persisted.endpoint, "http://127.0.0.1:4000/rpc");
+        let _ = std::fs::remove_file(discovery_path);
     }
 
     fn test_args(state_path: &str) -> Args {

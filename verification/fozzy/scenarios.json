@@ -28,7 +28,8 @@
       "checks": [
         "identity_stable_after_restart",
         "durable_state_reused_honestly",
-        "stale_runtime_references_rejected"
+        "stale_runtime_references_rejected",
+        "runtime_instance_rotates_per_daemon_run"
       ],
       "focus": ["restart", "runtime_ownership", "durable_vs_runtime"]
     },
