@@ -286,6 +286,22 @@ Result should include:
 - validation success or failure
 - field-level violations when present
 
+### `state.export`
+
+Purpose:
+- ask the daemon to produce an encrypted backup/export bundle for the durable node assets it owns
+
+Request should include:
+- output path
+- export encryption passphrase or equivalent secret
+- operator environment metadata
+
+Result should include:
+- bundle path
+- export timestamp
+- durable asset checksums
+- durable-state validation summary
+
 ### `state.reset`
 
 Purpose:
@@ -324,6 +340,7 @@ Before Quip is production-ready, the implemented daemon surface should cover:
 - `identity.show`
 - `state.show`
 - `state.validate`
+- `state.export`
 - `state.reset`
 
 Concrete payload examples for these operations are documented in [`docs/daemon-api-examples.md`](./daemon-api-examples.md).

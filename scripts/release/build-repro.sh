@@ -6,7 +6,7 @@ release_version="${RELEASE_VERSION:-dev}"
 
 mkdir -p dist release/artifacts release/sbom
 
-archive_path="dist/quicnet-source.tar.gz"
+archive_path="dist/quip-source.tar.gz"
 
 if command -v gtar >/dev/null 2>&1; then
   gtar \
@@ -36,9 +36,9 @@ else
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "${archive_path}" > release/artifacts/quicnet-source.sha256
+  sha256sum "${archive_path}" > release/artifacts/quip-source.sha256
 else
-  shasum -a 256 "${archive_path}" > release/artifacts/quicnet-source.sha256
+  shasum -a 256 "${archive_path}" > release/artifacts/quip-source.sha256
 fi
 
 printf '%s\n' "${release_version}" > release/artifacts/release-version.txt

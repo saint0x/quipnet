@@ -40,27 +40,39 @@ Recommended split:
 
 ## Safe Backup Procedure
 
-The safe production procedure is:
+The preferred production procedure is a daemon-owned encrypted export:
+1. Keep `quipd` running so the daemon remains the single writer and snapshot authority.
+2. Run `quip state backup` for the default backup location or `quip state export` for an explicit output path.
+3. Record the backup timestamp, node hostname, environment, and authority bootstrap source used by the node.
+4. Store the encrypted bundle under the operator's backup retention policy.
+
+If the daemon-owned export surface is unavailable, fall back to a cold file copy:
 1. Stop `quipd` or otherwise guarantee no concurrent durable-state writer is running.
 2. Copy `~/.quip/identity/node.json`.
 3. Copy `~/.quip/net/state.json`.
 4. Record the backup timestamp, node hostname, environment, and authority bootstrap source used by the node.
-5. Encrypt and store the backup artifacts.
+5. Encrypt and store the copied artifacts.
 
-If hot backup support is added later, it should come from an explicit daemon-owned snapshot/export path, not from operators guessing which files are safe to copy during live mutation.
+Do not invent ad hoc hot-copy procedures. Live backup is only safe through an explicit daemon-owned snapshot or export path.
+
+The current operator surface for that flow is:
+- `quip state backup`
+- `quip state export`
 
 ## Restore Procedure
 
 The safe restore procedure is:
 1. Stop `quipd`.
 2. Confirm the target machine is supposed to become the same logical node.
-3. Restore `~/.quip/identity/node.json`.
-4. Restore `~/.quip/net/state.json`.
-5. Confirm file ownership and permissions are correct for the runtime user.
-6. Restart `quipd`.
-7. Inspect runtime status and authority state before trusting the node as healthy.
+3. Run `quip state restore --input <bundle.qbk> --confirm`.
+4. Confirm file ownership and permissions are correct for the runtime user.
+5. Restart `quipd`.
+6. Inspect runtime status and authority state before trusting the node as healthy.
 
 Do not restore only half the durable contract unless the recovery plan explicitly calls for it.
+
+The current offline operator surface for that flow is:
+- `quip state restore --input <bundle.qbk> --confirm`
 
 ## Identity Rotation Is Not Restore
 

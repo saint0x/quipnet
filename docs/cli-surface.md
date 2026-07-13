@@ -114,6 +114,7 @@ Candidate subcommands:
 - `quip state validate`
 - `quip state backup`
 - `quip state export`
+- `quip state restore`
 - `quip state reset`
 
 Primary source:
@@ -168,6 +169,9 @@ Before this surface is complete, we need at least:
 - `quip identity show`
 - `quip state show`
 - `quip state validate`
+- `quip state backup`
+- `quip state export`
+- `quip state restore`
 - `quip state reset`
 
 That is the minimum honest operator surface for a daemon-owned node runtime.

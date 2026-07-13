@@ -181,11 +181,35 @@ pub struct StateResetPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateExportPayload {
+    pub output_path: String,
+    pub passphrase: String,
+    pub hostname: String,
+    pub environment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overwrite: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateResetResult {
     pub truth_kind: String,
     pub identity_preserved: bool,
     pub network_state_reset: bool,
     pub next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateExportResult {
+    pub truth_kind: String,
+    pub bundle_path: String,
+    pub created_at_unix_secs: u64,
+    pub hostname: String,
+    pub environment: String,
+    pub network: String,
+    pub identity_sha256_hex: String,
+    pub state_sha256_hex: String,
+    pub durable_state_present: bool,
+    pub durable_state_valid: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -595,6 +619,12 @@ mod tests {
         .expect("state show fixture should deserialize");
         assert!(state_show.ok);
 
+        let state_export: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/state.export.response.json"
+        ))
+        .expect("state export fixture should deserialize");
+        assert!(state_export.ok);
+
         let state_validate: ResponseEnvelope = serde_json::from_str(include_str!(
             "../../../fixtures/daemon/state.validate.response.json"
         ))
@@ -699,6 +729,21 @@ mod tests {
             state_reset_schema["allOf"][1]["properties"]["result"]["properties"]
                 ["network_state_reset"]["type"],
             serde_json::json!("boolean")
+        );
+
+        let state_export_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/state.export.response.schema.json"
+        ))
+        .expect("state export schema should parse");
+        assert_eq!(
+            state_export_schema["allOf"][1]["properties"]["result"]["properties"]["truth_kind"]
+                ["const"],
+            serde_json::json!("durable")
+        );
+        assert_eq!(
+            state_export_schema["allOf"][1]["properties"]["result"]["properties"]["bundle_path"]
+                ["type"],
+            serde_json::json!("string")
         );
     }
 }

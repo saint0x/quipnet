@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/state.export.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "truth_kind",
+            "bundle_path",
+            "created_at_unix_secs",
+            "hostname",
+            "environment",
+            "network",
+            "identity_sha256_hex",
+            "state_sha256_hex",
+            "durable_state_present",
+            "durable_state_valid"
+          ],
+          "properties": {
+            "truth_kind": { "const": "durable" },
+            "bundle_path": { "type": "string", "minLength": 1 },
+            "created_at_unix_secs": { "type": "integer", "minimum": 0 },
+            "hostname": { "type": "string", "minLength": 1 },
+            "environment": { "type": "string", "minLength": 1 },
+            "network": { "type": "string", "minLength": 1 },
+            "identity_sha256_hex": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "state_sha256_hex": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "durable_state_present": { "type": "boolean" },
+            "durable_state_valid": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  ]
+}

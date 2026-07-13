@@ -8,5 +8,4 @@ if ! command -v syft >/dev/null 2>&1; then
   exit 1
 fi
 
-syft dir:. -o spdx-json > release/sbom/quicnet-source.spdx.json
-
+syft dir:. -o spdx-json > release/sbom/quip-source.spdx.json

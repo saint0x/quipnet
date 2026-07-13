@@ -1,5 +1,4 @@
 fn main() -> i32 {
-    let _probe = "quicnet-delivery"
+    let _probe = "quip-delivery"
     return 0
 }
-

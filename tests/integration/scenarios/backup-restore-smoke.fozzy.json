@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "name": "backup-restore-smoke",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "backup_bundle_roundtrips_identity_and_state_files"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quipd", "state_export_response_writes_encrypted_bundle"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "daemonapi", "daemon_fixtures_deserialize_and_schemas_expose_new_fields"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quip", "default_backup_output_path_uses_backup_concern_dir"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quip", "restore_confirmation_error_mentions_daemon_shutdown_requirement"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    }
+  ]
+}

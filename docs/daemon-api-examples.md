@@ -261,6 +261,49 @@ Response:
 }
 ```
 
+## `state.export`
+
+Request:
+
+```json
+{
+  "request_id": "req-40005",
+  "operation": "state.export",
+  "auth": {
+    "kind": "local_process"
+  },
+  "payload": {
+    "output_path": "/Users/example/.quip/backup/personalcloud-prod-1720000123.qbk",
+    "passphrase": "backup-passphrase",
+    "hostname": "host-a",
+    "environment": "local",
+    "overwrite": false
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "request_id": "req-40005",
+  "result": {
+    "truth_kind": "durable",
+    "bundle_path": "/Users/example/.quip/backup/personalcloud-prod-1720000123.qbk",
+    "created_at_unix_secs": 1720000123,
+    "hostname": "host-a",
+    "environment": "local",
+    "network": "personalcloud-prod",
+    "identity_sha256_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+    "state_sha256_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+    "durable_state_present": true,
+    "durable_state_valid": true
+  },
+  "error": null
+}
+```
+
 ## `state.reset`
 
 Request:

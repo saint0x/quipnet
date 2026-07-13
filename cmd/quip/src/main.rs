@@ -9,15 +9,15 @@ use daemonapi::{
     RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
     RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
     SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
-    SessionUpgradePayload, SessionUpgradeResult, StateResetPayload, StateResetResult,
-    StateShowResult, StateValidateResult,
+    SessionUpgradePayload, SessionUpgradeResult, StateExportPayload, StateExportResult,
+    StateResetPayload, StateResetResult, StateShowResult, StateValidateResult,
 };
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
 use rand::rngs::OsRng;
 use serde_json::json;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
@@ -166,7 +166,41 @@ enum SessionCommand {
 #[derive(Subcommand, Debug)]
 enum StateCommand {
     Show,
+    Backup {
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long, default_value = "QUIP_BACKUP_PASSPHRASE")]
+        backup_passphrase_env: String,
+        #[arg(long, default_value = "local")]
+        environment: String,
+        #[arg(long)]
+        hostname: Option<String>,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    Export {
+        #[arg(long)]
+        output: String,
+        #[arg(long, default_value = "QUIP_BACKUP_PASSPHRASE")]
+        backup_passphrase_env: String,
+        #[arg(long, default_value = "local")]
+        environment: String,
+        #[arg(long)]
+        hostname: Option<String>,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
     Validate,
+    Restore {
+        #[arg(long)]
+        input: String,
+        #[arg(long, default_value = "QUIP_BACKUP_PASSPHRASE")]
+        backup_passphrase_env: String,
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long, default_value_t = true)]
+        overwrite: bool,
+    },
     Reset {
         #[arg(long)]
         confirm: bool,
@@ -776,6 +810,75 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     result.truth_kind,
                 );
             }
+            StateCommand::Backup {
+                output,
+                backup_passphrase_env,
+                environment,
+                hostname,
+                overwrite,
+            } => {
+                let output_path = output
+                    .map(|path| expand_home_path(&path))
+                    .unwrap_or_else(|| default_backup_output_path(&cli.network));
+                let passphrase = required_env_value(&backup_passphrase_env)?;
+                let result = daemon_request::<StateExportResult>(
+                    &cli,
+                    "state.export",
+                    serde_json::to_value(StateExportPayload {
+                        output_path: output_path.clone(),
+                        passphrase,
+                        hostname: hostname.unwrap_or_else(default_hostname),
+                        environment,
+                        overwrite: Some(overwrite),
+                    })?,
+                )?;
+                println!(
+                    "bundle_path={} created_at_unix_secs={} hostname={} environment={} network={} identity_sha256={} state_sha256={} durable_state_present={} durable_state_valid={} truth_kind={}",
+                    result.bundle_path,
+                    result.created_at_unix_secs,
+                    result.hostname,
+                    result.environment,
+                    result.network,
+                    result.identity_sha256_hex,
+                    result.state_sha256_hex,
+                    result.durable_state_present,
+                    result.durable_state_valid,
+                    result.truth_kind
+                );
+            }
+            StateCommand::Export {
+                output,
+                backup_passphrase_env,
+                environment,
+                hostname,
+                overwrite,
+            } => {
+                let passphrase = required_env_value(&backup_passphrase_env)?;
+                let result = daemon_request::<StateExportResult>(
+                    &cli,
+                    "state.export",
+                    serde_json::to_value(StateExportPayload {
+                        output_path: expand_home_path(&output),
+                        passphrase,
+                        hostname: hostname.unwrap_or_else(default_hostname),
+                        environment,
+                        overwrite: Some(overwrite),
+                    })?,
+                )?;
+                println!(
+                    "bundle_path={} created_at_unix_secs={} hostname={} environment={} network={} identity_sha256={} state_sha256={} durable_state_present={} durable_state_valid={} truth_kind={}",
+                    result.bundle_path,
+                    result.created_at_unix_secs,
+                    result.hostname,
+                    result.environment,
+                    result.network,
+                    result.identity_sha256_hex,
+                    result.state_sha256_hex,
+                    result.durable_state_present,
+                    result.durable_state_valid,
+                    result.truth_kind
+                );
+            }
             StateCommand::Validate => {
                 let report =
                     daemon_request::<StateValidateResult>(&cli, "state.validate", json!({}))?;
@@ -799,6 +902,45 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             .join(";")
                     },
                     report.truth_kind
+                );
+            }
+            StateCommand::Restore {
+                input,
+                backup_passphrase_env,
+                confirm,
+                overwrite,
+            } => {
+                if !confirm {
+                    return Err(usage_error(
+                        "state restore is destructive; rerun with --confirm after stopping quipd to restore the same logical node",
+                    )
+                    .into());
+                }
+                if daemon_endpoint_is_live(&cli)? {
+                    return Err(usage_error(
+                        "state restore requires quipd to be stopped before identity and durable state are replaced",
+                    )
+                    .into());
+                }
+                let passphrase = required_env_value(&backup_passphrase_env)?;
+                let report = fabric::restore_backup_bundle(fabric::DurableBackupRestoreRequest {
+                    input_path: PathBuf::from(expand_home_path(&input)),
+                    passphrase,
+                    identity_path: PathBuf::from(&cli.identity_path),
+                    state_path: PathBuf::from(&cli.state_path),
+                    overwrite,
+                })?;
+                println!(
+                    "bundle_path={} restored_identity_path={} restored_state_path={} created_at_unix_secs={} hostname={} environment={} network={} identity_sha256={} state_sha256={} next_action=daemon_start_required truth_kind=durable",
+                    report.input_path.display(),
+                    report.restored_identity_path.display(),
+                    report.restored_state_path.display(),
+                    report.created_at_unix_secs,
+                    report.hostname,
+                    report.environment,
+                    report.network,
+                    report.identity_sha256_hex,
+                    report.state_sha256_hex,
                 );
             }
             StateCommand::Reset { confirm } => {
@@ -1500,6 +1642,48 @@ fn expand_home_path(path: &str) -> String {
     path.to_string()
 }
 
+fn default_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown-host".to_string())
+}
+
+fn default_backup_output_path(network: &str) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_secs();
+    expand_home_path(&format!("~/.quip/backup/{network}-{ts}.qbk"))
+}
+
+fn required_env_value(name: &str) -> Result<String, Box<dyn Error>> {
+    std::env::var(name)
+        .map_err(|_| usage_error(format!("required environment variable {name} is not set")).into())
+}
+
+fn daemon_endpoint_is_live(cli: &Cli) -> Result<bool, Box<dyn Error>> {
+    let discovery = match load_daemon_discovery(&cli.control_discovery_path) {
+        Ok(discovery) => discovery,
+        Err(_) => return Ok(false),
+    };
+    let request = RequestEnvelope {
+        request_id: format!("probe-{}", std::process::id()),
+        operation: "runtime.health".to_string(),
+        auth: RequestAuth {
+            kind: AuthKind::LocalProcess,
+        },
+        payload: json!({}),
+    };
+    match ureq::post(&discovery.endpoint)
+        .set("Content-Type", "application/json")
+        .send_json(serde_json::to_value(&request)?)
+    {
+        Ok(_) => Ok(true),
+        Err(ureq::Error::Status(_, _)) => Ok(true),
+        Err(ureq::Error::Transport(_)) => Ok(false),
+    }
+}
+
 fn daemon_request<T>(
     cli: &Cli,
     operation: &str,
@@ -1790,6 +1974,24 @@ mod tests {
         );
 
         assert!(error.to_string().contains("--confirm"));
+    }
+
+    #[test]
+    fn default_backup_output_path_uses_backup_concern_dir() {
+        let output = default_backup_output_path("personalcloud-prod");
+
+        assert!(output.contains("/.quip/backup/"));
+        assert!(output.ends_with(".qbk"));
+    }
+
+    #[test]
+    fn restore_confirmation_error_mentions_daemon_shutdown_requirement() {
+        let error = usage_error(
+            "state restore is destructive; rerun with --confirm after stopping quipd to restore the same logical node",
+        );
+
+        assert!(error.to_string().contains("--confirm"));
+        assert!(error.to_string().contains("stopping quipd"));
     }
 
     #[test]

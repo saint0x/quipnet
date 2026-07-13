@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/state.export.request.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/request_envelope" },
+    {
+      "properties": {
+        "operation": { "const": "state.export" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["output_path", "passphrase", "hostname", "environment"],
+          "properties": {
+            "output_path": { "type": "string", "minLength": 1 },
+            "passphrase": { "type": "string", "minLength": 1 },
+            "hostname": { "type": "string", "minLength": 1 },
+            "environment": { "type": "string", "minLength": 1 },
+            "overwrite": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  ]
+}

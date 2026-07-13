@@ -1,14 +1,22 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use control::{AuthorityArtifactSnapshot, ControlClient};
 use crypto::IdentityKeypair;
 use membership::{CapabilityGrant, MembershipCertificate, RevocationRecord, RevocationTarget};
+use rand::{rngs::OsRng, RngCore};
 use relaywire::{RelayAnnouncement, RelayMap};
+use scrypt::{scrypt, Params as ScryptParams};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 pub use discovery::{BootstrapHint, BootstrapIngestReport, DiscoveryService};
 pub use model::*;
@@ -27,6 +35,7 @@ pub use scheduler::*;
 pub use transport::*;
 
 pub const DAEMON_STATE_SCHEMA_VERSION: u64 = 1;
+pub const BACKUP_BUNDLE_FORMAT_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DaemonRole {
@@ -83,6 +92,106 @@ pub enum DaemonStateError {
     UnsupportedSchemaVersion { found: u64, expected: u64 },
     #[error("durable state contains unsupported field `{0}`")]
     UnsupportedDurableField(String),
+    #[error("backup bundle is invalid or the passphrase is incorrect")]
+    InvalidBackupBundle,
+    #[error("backup bundle key derivation failed")]
+    BackupKeyDerivation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupAsset {
+    pub concern: String,
+    pub relative_path: String,
+    pub sha256_hex: String,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupManifest {
+    pub format: String,
+    pub format_version: u8,
+    pub created_at_unix_secs: u64,
+    pub hostname: String,
+    pub environment: String,
+    pub network: String,
+    pub identity_path: String,
+    pub state_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_snapshot: Option<String>,
+    pub durable_state_present: bool,
+    pub durable_state_valid: bool,
+    pub assets: Vec<DurableBackupAsset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupBundleData {
+    pub manifest: DurableBackupManifest,
+    pub identity_file_base64: String,
+    pub state_file_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupBundleEnvelope {
+    pub version: u8,
+    pub cipher: String,
+    pub kdf: String,
+    pub salt: [u8; 16],
+    pub nonce: [u8; 12],
+    pub ciphertext: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupExportRequest {
+    pub output_path: PathBuf,
+    pub passphrase: String,
+    pub hostname: String,
+    pub environment: String,
+    pub identity_path: PathBuf,
+    pub state_path: PathBuf,
+    pub network: String,
+    pub authority_origin: Option<String>,
+    pub authority_subject: Option<String>,
+    pub authority_snapshot: Option<String>,
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupExportReport {
+    pub bundle_path: PathBuf,
+    pub created_at_unix_secs: u64,
+    pub hostname: String,
+    pub environment: String,
+    pub network: String,
+    pub identity_sha256_hex: String,
+    pub state_sha256_hex: String,
+    pub durable_state_present: bool,
+    pub durable_state_valid: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupRestoreRequest {
+    pub input_path: PathBuf,
+    pub passphrase: String,
+    pub identity_path: PathBuf,
+    pub state_path: PathBuf,
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableBackupRestoreReport {
+    pub input_path: PathBuf,
+    pub restored_identity_path: PathBuf,
+    pub restored_state_path: PathBuf,
+    pub created_at_unix_secs: u64,
+    pub hostname: String,
+    pub environment: String,
+    pub network: String,
+    pub identity_sha256_hex: String,
+    pub state_sha256_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -798,6 +907,198 @@ pub fn validate_durable_state_file(
     })
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn derive_backup_key(passphrase: &[u8], salt: &[u8; 16]) -> Result<[u8; 32], DaemonStateError> {
+    let params = ScryptParams::recommended();
+    let mut key = [0_u8; 32];
+    scrypt(passphrase, salt, &params, &mut key)
+        .map_err(|_| DaemonStateError::BackupKeyDerivation)?;
+    Ok(key)
+}
+
+fn encrypt_backup_bundle(
+    bundle: &DurableBackupBundleData,
+    passphrase: &str,
+) -> Result<DurableBackupBundleEnvelope, DaemonStateError> {
+    let plaintext = serde_json::to_vec_pretty(bundle)?;
+    let mut salt = [0_u8; 16];
+    let mut nonce = [0_u8; 12];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce);
+    let mut key = derive_backup_key(passphrase.as_bytes(), &salt)?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+        .map_err(|_| DaemonStateError::InvalidBackupBundle)?;
+    key.zeroize();
+    Ok(DurableBackupBundleEnvelope {
+        version: BACKUP_BUNDLE_FORMAT_VERSION,
+        cipher: "chacha20poly1305".to_string(),
+        kdf: "scrypt".to_string(),
+        salt,
+        nonce,
+        ciphertext: BASE64.encode(ciphertext),
+    })
+}
+
+fn decrypt_backup_bundle(
+    envelope: &DurableBackupBundleEnvelope,
+    passphrase: &str,
+) -> Result<DurableBackupBundleData, DaemonStateError> {
+    if envelope.version != BACKUP_BUNDLE_FORMAT_VERSION
+        || envelope.cipher != "chacha20poly1305"
+        || envelope.kdf != "scrypt"
+    {
+        return Err(DaemonStateError::InvalidBackupBundle);
+    }
+    let ciphertext = BASE64
+        .decode(envelope.ciphertext.as_bytes())
+        .map_err(|_| DaemonStateError::InvalidBackupBundle)?;
+    let mut key = derive_backup_key(passphrase.as_bytes(), &envelope.salt)?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&envelope.nonce), ciphertext.as_ref())
+        .map_err(|_| DaemonStateError::InvalidBackupBundle)?;
+    key.zeroize();
+    serde_json::from_slice(&plaintext).map_err(Into::into)
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_secs()
+}
+
+pub fn export_backup_bundle(
+    request: DurableBackupExportRequest,
+) -> Result<DurableBackupExportReport, DaemonStateError> {
+    if request.output_path.exists() && !request.overwrite {
+        return Err(DaemonStateError::InvalidSession(format!(
+            "backup bundle path {} already exists; rerun with overwrite enabled",
+            request.output_path.display()
+        )));
+    }
+    let identity_bytes = fs::read(&request.identity_path)?;
+    let state_bytes = fs::read(&request.state_path)?;
+    let durable_state = inspect_durable_state_file(&request.state_path)?;
+    let identity_sha256_hex = sha256_hex(&identity_bytes);
+    let state_sha256_hex = sha256_hex(&state_bytes);
+    let created_at_unix_secs = now_unix_secs();
+    let bundle = DurableBackupBundleData {
+        manifest: DurableBackupManifest {
+            format: "quip_backup_bundle".to_string(),
+            format_version: BACKUP_BUNDLE_FORMAT_VERSION,
+            created_at_unix_secs,
+            hostname: request.hostname.clone(),
+            environment: request.environment.clone(),
+            network: request.network.clone(),
+            identity_path: request.identity_path.display().to_string(),
+            state_path: request.state_path.display().to_string(),
+            authority_origin: request.authority_origin.clone(),
+            authority_subject: request.authority_subject.clone(),
+            authority_snapshot: request.authority_snapshot.clone(),
+            durable_state_present: durable_state.present,
+            durable_state_valid: durable_state.valid,
+            assets: vec![
+                DurableBackupAsset {
+                    concern: "identity".to_string(),
+                    relative_path: "identity/node.json".to_string(),
+                    sha256_hex: identity_sha256_hex.clone(),
+                    bytes: identity_bytes.len(),
+                },
+                DurableBackupAsset {
+                    concern: "network_state".to_string(),
+                    relative_path: "net/state.json".to_string(),
+                    sha256_hex: state_sha256_hex.clone(),
+                    bytes: state_bytes.len(),
+                },
+            ],
+        },
+        identity_file_base64: BASE64.encode(identity_bytes),
+        state_file_base64: BASE64.encode(state_bytes),
+    };
+    let envelope = encrypt_backup_bundle(&bundle, &request.passphrase)?;
+    if let Some(parent) = request.output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&request.output_path, serde_json::to_vec_pretty(&envelope)?)?;
+    Ok(DurableBackupExportReport {
+        bundle_path: request.output_path,
+        created_at_unix_secs,
+        hostname: request.hostname,
+        environment: request.environment,
+        network: request.network,
+        identity_sha256_hex,
+        state_sha256_hex,
+        durable_state_present: durable_state.present,
+        durable_state_valid: durable_state.valid,
+    })
+}
+
+pub fn restore_backup_bundle(
+    request: DurableBackupRestoreRequest,
+) -> Result<DurableBackupRestoreReport, DaemonStateError> {
+    if !request.overwrite && (request.identity_path.exists() || request.state_path.exists()) {
+        return Err(DaemonStateError::InvalidSession(
+            "restore target already exists; rerun with overwrite enabled".to_string(),
+        ));
+    }
+    let envelope: DurableBackupBundleEnvelope =
+        serde_json::from_slice(&fs::read(&request.input_path)?)?;
+    let bundle = decrypt_backup_bundle(&envelope, &request.passphrase)?;
+    let identity_bytes = BASE64
+        .decode(bundle.identity_file_base64.as_bytes())
+        .map_err(|_| DaemonStateError::InvalidBackupBundle)?;
+    let state_bytes = BASE64
+        .decode(bundle.state_file_base64.as_bytes())
+        .map_err(|_| DaemonStateError::InvalidBackupBundle)?;
+    let identity_asset = bundle
+        .manifest
+        .assets
+        .iter()
+        .find(|asset| asset.concern == "identity")
+        .ok_or(DaemonStateError::InvalidBackupBundle)?;
+    let state_asset = bundle
+        .manifest
+        .assets
+        .iter()
+        .find(|asset| asset.concern == "network_state")
+        .ok_or(DaemonStateError::InvalidBackupBundle)?;
+    if sha256_hex(&identity_bytes) != identity_asset.sha256_hex
+        || sha256_hex(&state_bytes) != state_asset.sha256_hex
+    {
+        return Err(DaemonStateError::InvalidBackupBundle);
+    }
+    let state_value = serde_json::from_slice::<Value>(&state_bytes)
+        .map_err(|_| DaemonStateError::InvalidBackupBundle)?;
+    validate_durable_state_value(&state_value)?;
+    if let Some(parent) = request.identity_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = request.state_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&request.identity_path, &identity_bytes)?;
+    fs::write(&request.state_path, &state_bytes)?;
+    Ok(DurableBackupRestoreReport {
+        input_path: request.input_path,
+        restored_identity_path: request.identity_path,
+        restored_state_path: request.state_path,
+        created_at_unix_secs: bundle.manifest.created_at_unix_secs,
+        hostname: bundle.manifest.hostname,
+        environment: bundle.manifest.environment,
+        network: bundle.manifest.network,
+        identity_sha256_hex: sha256_hex(&identity_bytes),
+        state_sha256_hex: sha256_hex(&state_bytes),
+    })
+}
+
 #[derive(Debug)]
 pub struct LocalNode {
     pub network_id: NetworkId,
@@ -1290,6 +1591,13 @@ impl LocalControlPlane {
 
     pub fn validate_state_file(&self) -> Result<DurableStateInspectionReport, DaemonStateError> {
         validate_durable_state_file(&self.config.state_path)
+    }
+
+    pub fn export_backup_bundle(
+        &self,
+        request: DurableBackupExportRequest,
+    ) -> Result<DurableBackupExportReport, DaemonStateError> {
+        export_backup_bundle(request)
     }
 
     pub fn reset_network_state(&self) -> Result<bool, DaemonStateError> {
@@ -3481,6 +3789,59 @@ mod tests {
         assert_eq!(report.violations.len(), 1);
         assert_eq!(report.violations[0].path, "$.active_sessions");
         let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn backup_bundle_roundtrips_identity_and_state_files() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("quip-backup-roundtrip-{}", now_unix_secs()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let identity_path = temp_dir.join("identity-node.json");
+        let state_path = temp_dir.join("state.json");
+        let output_path = temp_dir.join("backup.qbk");
+        let restored_identity = temp_dir.join("restored-identity.json");
+        let restored_state = temp_dir.join("restored-state.json");
+        std::fs::write(&identity_path, b"{\"encrypted\":true}").expect("identity should write");
+        fixture_daemon_state("backup-roundtrip")
+            .save(&state_path)
+            .expect("state should persist");
+
+        let exported = export_backup_bundle(DurableBackupExportRequest {
+            output_path: output_path.clone(),
+            passphrase: "backup-passphrase".to_string(),
+            hostname: "host-a".to_string(),
+            environment: "test".to_string(),
+            identity_path: identity_path.clone(),
+            state_path: state_path.clone(),
+            network: "backup-roundtrip".to_string(),
+            authority_origin: Some("https://authority.example".to_string()),
+            authority_subject: Some("peer-authority".to_string()),
+            authority_snapshot: None,
+            overwrite: false,
+        })
+        .expect("backup should export");
+
+        assert_eq!(exported.network, "backup-roundtrip");
+        assert!(output_path.exists());
+        let restored = restore_backup_bundle(DurableBackupRestoreRequest {
+            input_path: output_path.clone(),
+            passphrase: "backup-passphrase".to_string(),
+            identity_path: restored_identity.clone(),
+            state_path: restored_state.clone(),
+            overwrite: false,
+        })
+        .expect("backup should restore");
+
+        assert_eq!(restored.network, "backup-roundtrip");
+        assert_eq!(
+            std::fs::read(&identity_path).expect("identity should read"),
+            std::fs::read(&restored_identity).expect("restored identity should read"),
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("state should read"),
+            std::fs::read(&restored_state).expect("restored state should read"),
+        );
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

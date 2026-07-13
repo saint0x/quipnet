@@ -58,13 +58,12 @@ Typical reasons:
 
 Baseline procedure:
 1. Stop `quipd`.
-2. Back up `~/.quip/identity/node.json`.
-3. Back up `~/.quip/net/state.json`.
-4. Preserve the old `net/state.json` for rollback or analysis.
-5. Remove or replace only `~/.quip/net/state.json`.
-6. Keep `~/.quip/identity/node.json` unchanged.
-7. Restart `quipd`.
-8. Re-bootstrap and verify the node rejoins as the same logical identity.
+2. Run `quip state backup` or `quip state export` to capture the current durable identity and network state bundle before changing anything.
+3. Preserve the previous bundle for rollback or analysis.
+4. Run `quip state reset --confirm` so only durable network state is removed.
+5. Keep `~/.quip/identity/node.json` unchanged.
+6. Restart `quipd`.
+7. Re-bootstrap and verify the node rejoins as the same logical identity.
 
 State reset is not identity rotation. If the identity file changes, the operator is doing a different operation.
 
@@ -79,7 +78,7 @@ This is a major operation and should only happen when:
 
 Baseline procedure:
 1. Stop `quipd`.
-2. Back up the current identity and durable state.
+2. Run `quip state backup` or `quip state export` to preserve the current identity and durable state before rotation.
 3. Generate or provision the new identity material through the approved process.
 4. Replace `~/.quip/identity/node.json`.
 5. Decide whether the old `net/state.json` is still valid for the new identity.
@@ -96,11 +95,10 @@ Use restore when the same logical node must come back after data loss, host loss
 
 Baseline procedure:
 1. Stop `quipd`.
-2. Restore `identity/node.json`.
-3. Restore `net/state.json`.
-4. Verify file ownership, permissions, and passphrase inputs.
-5. Restart `quipd`.
-6. Validate authority bootstrap and runtime health.
+2. Run `quip state restore --input <bundle.qbk> --confirm`.
+3. Verify file ownership, permissions, and passphrase inputs.
+4. Restart `quipd`.
+5. Validate authority bootstrap and runtime health.
 
 See [`docs/backup-and-restore.md`](./backup-and-restore.md) for the full restore contract.
 

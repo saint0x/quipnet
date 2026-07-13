@@ -150,13 +150,24 @@
     {
       "id": "backup-and-restore",
       "priority": 1,
-      "description": "Backup and restore recover the same logical node without confusing restore and rotation semantics.",
+      "description": "Backup and restore preserve the same logical node contract without confusing restore and rotation semantics.",
       "checks": [
         "identity_restored",
         "network_state_restored",
-        "post_restore_runtime_correct"
+        "restore_writes_canonical_paths"
       ],
       "focus": ["backup", "restore", "identity_vs_network_state"]
+    },
+    {
+      "id": "state-export-surface",
+      "priority": 1,
+      "description": "Daemon-backed state export produces encrypted bundles and the offline restore path preserves the same logical node contract.",
+      "checks": [
+        "bundle_export_succeeds",
+        "bundle_restore_roundtrips",
+        "offline_restore_guard_visible"
+      ],
+      "focus": ["backup", "restore", "operator_surface"]
     }
   ]
 }

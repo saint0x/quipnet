@@ -7,8 +7,8 @@ if ! command -v cosign >/dev/null 2>&1; then
 fi
 
 artifacts=(
-  "dist/quicnet-source.tar.gz"
-  "release/artifacts/quicnet-source.sha256"
+  "dist/quip-source.tar.gz"
+  "release/artifacts/quip-source.sha256"
 )
 
 for artifact in "${artifacts[@]}"; do
@@ -18,4 +18,3 @@ for artifact in "${artifacts[@]}"; do
     --output-certificate "${artifact}.pem" \
     "${artifact}"
 done
-

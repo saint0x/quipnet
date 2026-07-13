@@ -17,8 +17,8 @@ use daemonapi::{
     RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary, SessionClosePayload,
     SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
     SessionReconcileEntry as ApiSessionReconcileEntry, SessionReconcilePayload,
-    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult, StateResetPayload,
-    StateResetResult, StateShowResult, StateValidateResult,
+    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult, StateExportPayload,
+    StateExportResult, StateResetPayload, StateResetResult, StateShowResult, StateValidateResult,
 };
 use fabric::SessionLifecycleTransport;
 use fabric::{
@@ -773,6 +773,7 @@ fn route_control_request(
         "identity.verify" => identity_verify_response(args, control, local_identity, envelope),
         "state.show" => state_show_response(args, control, envelope),
         "state.validate" => state_validate_response(args, control, envelope),
+        "state.export" => state_export_response(args, control, envelope),
         "state.reset" => state_reset_response(control, envelope),
         "authority.sync_snapshot" => runtime.block_on(authority_sync_snapshot_response(
             args,
@@ -1146,6 +1147,54 @@ fn state_validate_response(
                     .into_iter()
                     .map(durable_state_violation_entry)
                     .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn state_export_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload = match serde_json::from_value::<StateExportPayload>(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid state export payload: {error}"),
+                None,
+            );
+        }
+    };
+    match control.export_backup_bundle(fabric::DurableBackupExportRequest {
+        output_path: payload.output_path.into(),
+        passphrase: payload.passphrase,
+        hostname: payload.hostname,
+        environment: payload.environment,
+        identity_path: PathBuf::from(&args.identity_path),
+        state_path: PathBuf::from(&args.state_path),
+        network: args.network.clone(),
+        authority_origin: args.authority_origin.clone(),
+        authority_subject: args.authority_subject.clone(),
+        authority_snapshot: args.authority_snapshot.clone(),
+        overwrite: payload.overwrite.unwrap_or(false),
+    }) {
+        Ok(report) => ResponseEnvelope::success(
+            envelope.request_id,
+            StateExportResult {
+                truth_kind: "durable".to_string(),
+                bundle_path: report.bundle_path.display().to_string(),
+                created_at_unix_secs: report.created_at_unix_secs,
+                hostname: report.hostname,
+                environment: report.environment,
+                network: report.network,
+                identity_sha256_hex: report.identity_sha256_hex,
+                state_sha256_hex: report.state_sha256_hex,
+                durable_state_present: report.durable_state_present,
+                durable_state_valid: report.durable_state_valid,
             },
         ),
         Err(error) => daemon_error_response(envelope.request_id, &error),
@@ -2833,6 +2882,50 @@ mod tests {
         assert!(result.network_state_reset);
         assert_eq!(result.next_action, "daemon_restart_required");
         assert!(!state_path.exists());
+    }
+
+    #[test]
+    fn state_export_response_writes_encrypted_bundle() {
+        let state_path = unique_temp_path("quipd-state-export");
+        let identity_path = unique_temp_path("quipd-state-export-identity");
+        let output_path = unique_temp_path("quipd-state-export-bundle");
+        let control = LocalControlPlane::new(DaemonConfig::new("state-export", &state_path));
+        let state = fabric::fixture_daemon_state("state-export");
+        state.save(&state_path).expect("state should persist");
+        std::fs::write(&identity_path, br#"{"encrypted":true}"#).expect("identity should persist");
+        let mut args = test_args(state_path.to_string_lossy().as_ref());
+        args.identity_path = identity_path.to_string_lossy().into_owned();
+        args.network = "state-export".to_string();
+
+        let response = state_export_response(
+            &args,
+            &control,
+            RequestEnvelope {
+                request_id: "req-state-export".to_string(),
+                operation: "state.export".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({
+                    "output_path": output_path.to_string_lossy(),
+                    "passphrase": "backup-passphrase",
+                    "hostname": "host-a",
+                    "environment": "test",
+                    "overwrite": true
+                }),
+            },
+        );
+
+        assert!(response.ok);
+        let result: StateExportResult =
+            serde_json::from_value(response.result.expect("export result should exist"))
+                .expect("export result should deserialize");
+        assert_eq!(result.truth_kind, "durable");
+        assert_eq!(result.network, "state-export");
+        assert!(Path::new(&result.bundle_path).exists());
+        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_file(identity_path);
+        let _ = std::fs::remove_file(output_path);
     }
 
     #[test]

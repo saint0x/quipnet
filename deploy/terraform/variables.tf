@@ -1,7 +1,7 @@
 variable "project" {
   description = "Project identifier shared across bootstrap, relay, and observer infrastructure."
   type        = string
-  default     = "quicnet"
+  default     = "quip"
 }
 
 variable "environment" {

@@ -483,9 +483,12 @@ dependencies = [
 name = "fabric"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "chacha20poly1305",
  "control",
  "crypto",
  "discovery",
+ "hex",
  "membership",
  "model",
  "netcheck",
@@ -494,16 +497,20 @@ dependencies = [
  "policy",
  "protocol",
  "quic",
+ "rand",
  "records",
  "relay",
  "relaywire",
  "routing",
  "scheduler",
+ "scrypt",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "transport",
+ "zeroize",
 ]
 
 [[package]]
