@@ -23,7 +23,7 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 1
+      "const": 2
     },
     "network": {
       "type": "string",

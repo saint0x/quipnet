@@ -7,11 +7,11 @@
       {
         "listener_id": "lst-4a2dd77cb5719fa2",
         "transport": "quic",
-        "bind_summary": "protocol=/quicnet/control/1 advertise=true",
-        "protocol": "/quicnet/control/1",
+        "bind_summary": "protocol=/quip/control/1 advertise=true",
+        "protocol": "/quip/control/1",
         "advertise": true,
         "state": "suppressed",
-        "state_reason": "no active capability grants for /quicnet/control/1",
+        "state_reason": "no active capability grants for /quip/control/1",
         "age_seconds": 3
       }
     ]

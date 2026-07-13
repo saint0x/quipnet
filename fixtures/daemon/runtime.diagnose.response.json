@@ -166,7 +166,7 @@
         "listener_id": "listener-1",
         "transport": "quic",
         "bind_summary": "0.0.0.0:9443",
-        "protocol": "/quicnet/control/1",
+        "protocol": "/quip/control/1",
         "advertise": true,
         "state": "suppressed",
         "state_reason": "authority policy temporarily denies exposure",
@@ -177,7 +177,7 @@
       {
         "session_id": "9f10f8e8f34137b1eecce5e7ab9e843a",
         "peer_id": "ed25519:active-peer",
-        "protocol": "/quicnet/control/1",
+        "protocol": "/quip/control/1",
         "class": "control",
         "state": "active",
         "path_class": "relay",

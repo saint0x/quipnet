@@ -1,7 +1,7 @@
-# QUICNET — Production Cryptographic Peer Fabric
+# QUIP — Production Cryptographic Peer Fabric
 
 **Document:** `PLAN.md`  
-**Project:** Quipnet  
+**Project:** Quip  
 **Status:** Production architecture and execution plan  
 **Purpose:** Define the end-to-end design, implementation, security, operations, and rollout of a global cryptographic peer network that serves as the foundational substrate for PersonalCloud, distributed inference, distributed storage, decentralized applications, and optional consensus or blockchain systems.
 
@@ -9,13 +9,13 @@
 
 ## 0. Executive Summary
 
-Quipnet is a production-grade cryptographic peer fabric: a global, identity-native, encrypted, topology-aware network in which machines join as durable cryptographic peers and communicate over the best available path.
+Quip is a production-grade cryptographic peer fabric: a global, identity-native, encrypted, topology-aware network in which machines join as durable cryptographic peers and communicate over the best available path.
 
-A Quipnet node may run on a laptop, home server, phone, embedded device, VPS, bare-metal host, cloud VM, colocation server, or regional edge point. Once enrolled, the node can discover authorized peers, advertise capabilities, establish direct encrypted sessions through NATs and firewalls when possible, fall back to relays when necessary, measure path quality continuously, and expose a uniform transport API to higher-level distributed applications.
+A Quip node may run on a laptop, home server, phone, embedded device, VPS, bare-metal host, cloud VM, colocation server, or regional edge point. Once enrolled, the node can discover authorized peers, advertise capabilities, establish direct encrypted sessions through NATs and firewalls when possible, fall back to relays when necessary, measure path quality continuously, and expose a uniform transport API to higher-level distributed applications.
 
-Quipnet is not itself a blockchain, distributed filesystem, model-serving system, or scheduler. It is the common network substrate beneath those systems.
+Quip is not itself a blockchain, distributed filesystem, model-serving system, or scheduler. It is the common network substrate beneath those systems.
 
-Quipnet owns:
+Quip owns:
 
 - cryptographic node identity;
 - enrollment and membership;
@@ -32,7 +32,7 @@ Quipnet owns:
 - policy enforcement;
 - observability, debugging, upgrades, and fleet operations.
 
-Applications above Quipnet own:
+Applications above Quip own:
 
 - distributed inference execution;
 - model partitioning and scheduling;
@@ -48,7 +48,7 @@ The critical architectural rule is:
 
 > The packet path must remain fast, local, and decentralized. Global consensus must never be required to establish or use an ordinary peer connection.
 
-Quipnet combines four proven ideas without importing any one existing stack wholesale:
+Quip combines four proven ideas without importing any one existing stack wholesale:
 
 1. Tailscale-style identity, endpoint discovery, NAT traversal, roaming, and relay fallback.
 2. QUIC-style encrypted user-space transport, multiplexed streams, datagrams, connection migration, and congestion control.
@@ -61,12 +61,12 @@ The implementation should be written primarily in Rust, use QUIC over UDP as the
 
 ## 1. Product Vision
 
-Quipnet should make any machine deployable as a programmable point in a private or decentralized global network.
+Quip should make any machine deployable as a programmable point in a private or decentralized global network.
 
 A new server should be able to join with an operation similar to:
 
 ```bash
-quicnet join \
+quip join \
   --network personalcloud-prod \
   --enrollment-token "$TOKEN" \
   --roles relay,storage-cache,inference-worker \
@@ -139,7 +139,7 @@ A single undifferentiated byte stream is insufficient for distributed inference 
 
 ### 2.5 The base layer is application-agnostic
 
-Quipnet may know that a peer advertises `inference/1` or `blocks/1`, but it must not know transformer-layer semantics, file-directory semantics, or transaction validation rules.
+Quip may know that a peer advertises `inference/1` or `blocks/1`, but it must not know transformer-layer semantics, file-directory semantics, or transaction validation rules.
 
 ### 2.6 Decentralization does not mean consensus everywhere
 
@@ -168,7 +168,7 @@ All peer traffic is authenticated and encrypted. Every important state transitio
 
 ### 2.10 Physics-aware distributed systems
 
-Quipnet should minimize avoidable overhead, but it cannot remove speed-of-light delay, congestion, ISP asymmetry, packet loss, or limited uplink bandwidth. Applications must partition work at network-tolerant boundaries.
+Quip should minimize avoidable overhead, but it cannot remove speed-of-light delay, congestion, ISP asymmetry, packet loss, or limited uplink bandwidth. Applications must partition work at network-tolerant boundaries.
 
 ---
 
@@ -219,7 +219,7 @@ Quipnet should minimize avoidable overhead, but it cannot remove speed-of-light 
 - orchestration policy beyond generic service/capability routing;
 - application data encryption above transport where end-to-end application keys are desired.
 
-These will be separate Quipnet protocols and applications.
+These will be separate Quip protocols and applications.
 
 ---
 
@@ -227,7 +227,7 @@ These will be separate Quipnet protocols and applications.
 
 ### 4.1 Node
 
-A Quipnet node is a running instance of `quicnetd` with:
+A Quip node is a running instance of `quipd` with:
 
 - a long-lived identity key or hardware-backed identity;
 - one or more network memberships;
@@ -241,7 +241,7 @@ A Quipnet node is a running instance of `quicnetd` with:
 
 ### 4.2 Network
 
-A Quipnet network is a cryptographically scoped administrative and routing domain.
+A Quip network is a cryptographically scoped administrative and routing domain.
 
 Each network has:
 
@@ -305,7 +305,7 @@ A node may possess multiple roles, each represented by signed, scoped, expiring 
 │ inference • storage • files • agents • ledger • messaging   │
 ├──────────────────────────────────────────────────────────────┤
 │ Application Protocols                                       │
-│ /quicnet/inference/1 • /blocks/1 • /consensus/1 • /rpc/1    │
+│ /quip/inference/1 • /blocks/1 • /consensus/1 • /rpc/1    │
 ├──────────────────────────────────────────────────────────────┤
 │ Fabric Services                                             │
 │ discovery • signed records • DHT • gossip • service routing │
@@ -333,7 +333,7 @@ The production node is divided into components with explicit internal interfaces
 Recommended monorepo:
 
 ```text
-quicnet/
+quip/
 ├── Cargo.toml
 ├── crates/
 │   ├── qn-types/              # canonical IDs, records, enums
@@ -358,8 +358,8 @@ quicnet/
 │   ├── qn-ffi/                # C ABI for other languages
 │   └── qn-testkit/            # simulation and fault injection
 ├── cmd/
-│   ├── quicnetd/              # node daemon
-│   ├── quicnet/               # CLI
+│   ├── quipd/              # node daemon
+│   ├── quip/               # CLI
 │   ├── qn-relay/              # standalone relay service
 │   ├── qn-bootstrap/          # bootstrap/directory service
 │   ├── qn-authority/          # membership authority
@@ -520,7 +520,7 @@ Examples:
 
 - may relay opaque packets up to 2 Gbps;
 - may advertise storage provider records;
-- may accept `/quicnet/inference/1` jobs;
+- may accept `/quip/inference/1` jobs;
 - may participate in consensus group X;
 - may issue sub-grants for region Y;
 - may not receive plaintext model weights.
@@ -542,7 +542,7 @@ No design should depend on a permanently online global revocation service for ev
 
 ## 9. Signed Record Layer
 
-The signed record layer is the blockchain-like substrate of Quipnet, without imposing blockchain consensus on routine state.
+The signed record layer is the blockchain-like substrate of Quip, without imposing blockchain consensus on routine state.
 
 ### 9.1 Canonical record envelope
 
@@ -609,7 +609,7 @@ Capability and provider records should disclose the minimum necessary metadata.
 
 ## 10. Peer Discovery
 
-Quipnet must combine discovery methods rather than depend on one global mechanism.
+Quip must combine discovery methods rather than depend on one global mechanism.
 
 ### 10.1 Bootstrap discovery
 
@@ -619,7 +619,7 @@ Bootstrap nodes return signed or verifiable peer hints but do not become trusted
 
 ### 10.2 LAN discovery
 
-Use authenticated mDNS or a custom local discovery exchange to identify nearby Quipnet peers. Never trust LAN discovery without cryptographic verification.
+Use authenticated mDNS or a custom local discovery exchange to identify nearby Quip peers. Never trust LAN discovery without cryptographic verification.
 
 ### 10.3 Authority-assisted directory
 
@@ -751,7 +751,7 @@ Why:
 
 ### 12.2 Implementation strategy
 
-Use a mature Rust QUIC implementation behind an internal adapter. Do not allow the public Quipnet SDK to expose implementation-specific types.
+Use a mature Rust QUIC implementation behind an internal adapter. Do not allow the public Quip SDK to expose implementation-specific types.
 
 Create a strict interface boundary:
 
@@ -819,14 +819,14 @@ Never deserialize unbounded attacker-controlled allocations.
 Application protocols use versioned identifiers:
 
 ```text
-/quicnet/control/1
-/quicnet/identify/1
-/quicnet/records/1
-/quicnet/relay/1
-/quicnet/blocks/1
-/quicnet/inference/1
-/quicnet/kv-transfer/1
-/quicnet/consensus/1
+/quip/control/1
+/quip/identify/1
+/quip/records/1
+/quip/relay/1
+/quip/blocks/1
+/quip/inference/1
+/quip/kv-transfer/1
+/quip/consensus/1
 ```
 
 Negotiation should support:
@@ -904,7 +904,7 @@ Enforce per-peer and per-protocol quotas to prevent starvation.
 
 ## 14. Path Engine
 
-The path engine is a first-class Quipnet subsystem, not a hidden transport detail.
+The path engine is a first-class Quip subsystem, not a hidden transport detail.
 
 ### 14.1 Candidate model
 
@@ -984,7 +984,7 @@ Support:
 
 ### 14.6 Multipath
 
-Design the Quipnet API for multipath immediately, even if initial production uses active/standby and application-level striping before native multipath QUIC is mature.
+Design the Quip API for multipath immediately, even if initial production uses active/standby and application-level striping before native multipath QUIC is mature.
 
 Modes:
 
@@ -1030,7 +1030,7 @@ Native multipath QUIC should be integrated behind feature negotiation when stand
 
 #### Peer relay
 
-- an authorized Quipnet peer forwards encrypted traffic;
+- an authorized Quip peer forwards encrypted traffic;
 - useful for home labs, private regions, and provider-local routing;
 - capability-scoped and metered.
 
@@ -1092,7 +1092,7 @@ Higher-level billing may use these metrics, but the base relay protocol remains 
 Applications address peers by:
 
 ```text
-quicnet://<network-id>/<peer-id>/<protocol-or-service>
+quip://<network-id>/<peer-id>/<protocol-or-service>
 ```
 
 ### 16.2 Virtual IP compatibility
@@ -1153,7 +1153,7 @@ Start with a declarative policy model, compiled into deterministic local rules.
 Example:
 
 ```text
-allow protocol /quicnet/inference/1
+allow protocol /quip/inference/1
   from role scheduler
   to role inference-worker
   when network == personalcloud-prod
@@ -1213,7 +1213,7 @@ pub trait Fabric {
 
 ### 18.2 Daemon API
 
-Applications normally communicate with `quicnetd` through:
+Applications normally communicate with `quipd` through:
 
 - Unix domain socket on Linux/macOS;
 - named pipe on Windows;
@@ -1243,7 +1243,7 @@ Do not couple the first transport implementation to a specific accelerator runti
 
 ## 19. Distributed Inference Support Requirements
 
-Quipnet does not schedule inference, but it must expose the information and primitives needed by an inference runtime.
+Quip does not schedule inference, but it must expose the information and primitives needed by an inference runtime.
 
 ### 19.1 Required network capabilities
 
@@ -1299,7 +1299,7 @@ Fine-grained tensor parallelism over distant WAN paths is an application-level a
 
 ### 20.1 Common content service
 
-Quipnet may provide generic support for:
+Quip may provide generic support for:
 
 - `ContentId`;
 - provider lookup;
@@ -1311,7 +1311,7 @@ Quipnet may provide generic support for:
 
 ### 20.2 Storage application responsibilities
 
-A storage layer above Quipnet owns:
+A storage layer above Quip owns:
 
 - chunking algorithm;
 - Merkle DAG format;
@@ -1326,7 +1326,7 @@ A storage layer above Quipnet owns:
 
 ### 20.3 Model weights
 
-Weights should be distributed as immutable content-addressed shards, fetched to local NVMe or RAM before active inference. Quipnet must not assume remote WAN reads can substitute for VRAM or local model memory.
+Weights should be distributed as immutable content-addressed shards, fetched to local NVMe or RAM before active inference. Quip must not assume remote WAN reads can substitute for VRAM or local model memory.
 
 ---
 
@@ -1335,10 +1335,10 @@ Weights should be distributed as immutable content-addressed shards, fetched to 
 A blockchain or consensus system should run as an application protocol:
 
 ```text
-/quicnet/consensus/<protocol>/<version>
+/quip/consensus/<protocol>/<version>
 ```
 
-Quipnet contributes:
+Quip contributes:
 
 - authenticated peers;
 - low-latency messaging;
@@ -1420,7 +1420,7 @@ Assume:
 
 ### 22.4 Metadata privacy
 
-Encrypted transport does not hide peer relationships, timing, sizes, or endpoint addresses from all observers. Quipnet is not an anonymity network.
+Encrypted transport does not hide peer relationships, timing, sizes, or endpoint addresses from all observers. Quip is not an anonymity network.
 
 Provide optional privacy features:
 
@@ -1499,16 +1499,16 @@ Structured logs with:
 ### 23.4 Operator commands
 
 ```bash
-quicnet status
-quicnet peers
-quicnet peer inspect <peer>
-quicnet netcheck
-quicnet path probe <peer>
-quicnet path watch <peer>
-quicnet relay status
-quicnet records inspect <namespace>
-quicnet policy explain <peer> <protocol>
-quicnet debug bundle
+quip status
+quip peers
+quip peer inspect <peer>
+quip netcheck
+quip path probe <peer>
+quip path watch <peer>
+quip relay status
+quip records inspect <namespace>
+quip policy explain <peer> <protocol>
+quip debug bundle
 ```
 
 ### 23.5 Connection explanation
@@ -1968,7 +1968,7 @@ Deliver integration profiles for:
 
 Exit criteria:
 
-- each application uses only stable Quipnet APIs;
+- each application uses only stable Quip APIs;
 - application failure cannot compromise network authority;
 - network remains useful without any single application.
 
@@ -2026,7 +2026,7 @@ Required runbooks:
 - proven DHT and gossip concepts;
 - OpenTelemetry-compatible instrumentation.
 
-### Build as Quipnet core
+### Build as Quip core
 
 - identity-to-session binding;
 - membership and capability model;
@@ -2088,7 +2088,7 @@ Mitigation: scoped discovery, minimum advertisements, private provider records, 
 
 ## 35. Definition of Done
 
-Quipnet is production-ready when:
+Quip is production-ready when:
 
 1. A node can securely join from a home network, VPS, bare-metal server, or cloud environment using a short-lived credential.
 2. Node identity remains stable across IP changes, restarts, and transport-key rotation.
@@ -2102,13 +2102,13 @@ Quipnet is production-ready when:
 10. The network survives bootstrap, relay, authority, and regional failures within documented limits.
 11. Mixed-version rolling upgrades work.
 12. Security audits, fuzzing, chaos testing, and scale testing meet release gates.
-13. PersonalCloud, distributed storage, distributed inference, and an optional consensus application can all run above Quipnet without modifying its core semantics.
+13. PersonalCloud, distributed storage, distributed inference, and an optional consensus application can all run above Quip without modifying its core semantics.
 
 ---
 
 ## 36. Immediate Engineering Actions
 
-1. Create the Quipnet monorepo and RFC process.
+1. Create the Quip monorepo and RFC process.
 2. Write `RFC-0001: Identity, Network, and Trust Domains`.
 3. Write `RFC-0002: Signed Record Envelope and Canonical Encoding`.
 4. Write `RFC-0003: Transport Abstraction and Delivery Semantics`.
@@ -2159,7 +2159,7 @@ Primary references:
 
 # Final Architecture Statement
 
-Quipnet will be a global cryptographic peer fabric in which identity is derived from keys, membership is expressed through signed capabilities, discovery is distributed and scoped, endpoint selection is dynamic, secure sessions run primarily over direct QUIC paths, relays guarantee reachability, and applications receive explicit delivery and traffic semantics.
+Quip will be a global cryptographic peer fabric in which identity is derived from keys, membership is expressed through signed capabilities, discovery is distributed and scoped, endpoint selection is dynamic, secure sessions run primarily over direct QUIC paths, relays guarantee reachability, and applications receive explicit delivery and traffic semantics.
 
 Its decentralized character comes from self-certifying peers, signed records, direct communication, distributed discovery, and the absence of a mandatory central data path—not from forcing every network event into a blockchain.
 

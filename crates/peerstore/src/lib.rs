@@ -115,7 +115,7 @@ mod tests {
         store.upsert_peer_with_status(
             PeerSnapshot {
                 peer: peer.clone(),
-                protocols: vec!["/quicnet/control/1".into()],
+                protocols: vec!["/quip/control/1".into()],
                 addresses: vec!["udp://203.0.113.10:4242".into()],
             },
             PeerStatus {

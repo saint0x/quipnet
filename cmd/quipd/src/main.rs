@@ -3008,7 +3008,7 @@ mod tests {
 
     #[test]
     fn prepare_state_for_trigger_reloads_existing_state_for_state_change() {
-        let state_path = unique_temp_path("quicnetd-prepare-state-change");
+        let state_path = unique_temp_path("quipd-prepare-state-change");
         let control =
             LocalControlPlane::new(DaemonConfig::new("prepare-state-change", &state_path));
         let state = fabric::fixture_daemon_state("prepare-state-change");
@@ -3032,7 +3032,7 @@ mod tests {
 
     #[test]
     fn prepare_state_for_trigger_reprobes_before_network_change_cycle() {
-        let state_path = unique_temp_path("quicnetd-prepare-network-change");
+        let state_path = unique_temp_path("quipd-prepare-network-change");
         let control =
             LocalControlPlane::new(DaemonConfig::new("prepare-network-change", &state_path));
         let mut state = fabric::fixture_daemon_state("prepare-network-change");
@@ -3059,7 +3059,7 @@ mod tests {
 
     #[test]
     fn trigger_monitor_detects_state_change() {
-        let temp = unique_temp_path("quicnetd-trigger-state");
+        let temp = unique_temp_path("quipd-trigger-state");
         std::fs::write(&temp, "v1").expect("state file should write");
         let args = test_args(temp.to_string_lossy().as_ref());
         let mut monitor = DaemonTriggerMonitor::new(&args);
@@ -3074,8 +3074,8 @@ mod tests {
 
     #[test]
     fn trigger_monitor_detects_network_change_file_touch() {
-        let state_path = unique_temp_path("quicnetd-trigger-state");
-        let trigger_path = unique_temp_path("quicnetd-network-change");
+        let state_path = unique_temp_path("quipd-trigger-state");
+        let trigger_path = unique_temp_path("quipd-network-change");
         std::fs::write(&state_path, "state").expect("state file should write");
         let mut args = test_args(state_path.to_string_lossy().as_ref());
         args.network_change_trigger_path = Some(trigger_path.to_string_lossy().into_owned());
@@ -3434,7 +3434,7 @@ mod tests {
         let control = LocalControlPlane::new(DaemonConfig::new(network, &state_path));
         let authority = IdentityKeypair::from_secret_bytes([104_u8; 32]);
         let local_identity = IdentityKeypair::from_secret_bytes([105_u8; 32]);
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol");
         let mut state = fabric::fixture_daemon_state(network);
         let target = state
             .peers
@@ -3544,7 +3544,7 @@ mod tests {
                     id: "listener-1".to_string(),
                 },
                 json!({
-                    "protocol": "/quicnet/control/1",
+                    "protocol": "/quip/control/1",
                     "class": "interactive",
                     "prior_reason": "policy denied reconnect"
                 }),
@@ -3593,7 +3593,7 @@ mod tests {
         state
             .save(&state_path)
             .expect("fixture state should persist");
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol should parse");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol should parse");
         let transport = QuicTransportAdapter::default();
         for _ in 0..3 {
             transport
@@ -3658,9 +3658,7 @@ mod tests {
             .connect(RoutePlan {
                 local_peer: local,
                 peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"terminal-sessions-peer"),
-                protocol: Some(
-                    ProtocolId::new("/quicnet/control/1").expect("protocol should parse"),
-                ),
+                protocol: Some(ProtocolId::new("/quip/control/1").expect("protocol should parse")),
                 class: TrafficClass::Interactive,
                 path_kind: PathKind::DirectUdp,
                 source: RouteSource::Observed,
@@ -3728,7 +3726,7 @@ mod tests {
         let control =
             LocalControlPlane::new(DaemonConfig::new("quipd-runtime-diagnose", &state_path));
         let transport = QuicTransportAdapter::default();
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol should parse");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol should parse");
         transport
             .suppress_reconnect(
                 &PeerId::from_public_key(KeyAlgorithm::Ed25519, b"diagnose-peer"),
@@ -3779,7 +3777,7 @@ mod tests {
         let state_path = unique_temp_path("quipd-runtime-health");
         let control = LocalControlPlane::new(DaemonConfig::new("runtime-health", &state_path));
         let transport = QuicTransportAdapter::default();
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol should parse");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol should parse");
         transport
             .suppress_reconnect(
                 &PeerId::from_public_key(KeyAlgorithm::Ed25519, b"health-suppressed-peer"),
@@ -3820,7 +3818,7 @@ mod tests {
             identity_path: "./var/test-identity.json".to_string(),
             control_discovery_path: "./var/control.json".to_string(),
             control_bind: "127.0.0.1:0".to_string(),
-            identity_passphrase_env: "QUICNET_TEST_IDENTITY".to_string(),
+            identity_passphrase_env: "QUIP_TEST_IDENTITY".to_string(),
             authority_snapshot: None,
             authority_origin: None,
             authority_subject: None,

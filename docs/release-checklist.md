@@ -33,6 +33,7 @@ It should be used alongside:
 - [ ] Authority inspection and sync commands are daemon-backed.
 - [ ] Identity inspection commands are explicit and safe.
 - [ ] State validation and reset commands are explicit and safe.
+- [ ] State migration commands are explicit and safe.
 - [ ] CLI output clearly distinguishes runtime truth from durable remembered state.
 
 ## Authority
@@ -58,6 +59,7 @@ It should be used alongside:
 
 - [ ] Identity inspection workflow is backed by real commands.
 - [ ] Durable state validation workflow is backed by real commands.
+- [ ] Durable state migration workflow is backed by real commands.
 - [ ] Safe state reset workflow is backed by real commands.
 - [ ] Authority sync and authority diagnostics are backed by real commands.
 - [ ] Backup and restore procedures are documented and match implementation.

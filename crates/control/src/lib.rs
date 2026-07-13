@@ -403,7 +403,7 @@ mod tests {
             network_id.clone(),
             subject.peer_id(),
             vec!["records.publish".to_string()],
-            vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+            vec![ProtocolId::new("/quip/records/1").expect("protocol")],
             ResourceLimits::default(),
             vec![],
             100,
@@ -472,7 +472,7 @@ mod tests {
             network_id.clone(),
             subject.peer_id(),
             vec!["records.publish".to_string()],
-            vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+            vec![ProtocolId::new("/quip/records/1").expect("protocol")],
             ResourceLimits::default(),
             vec![],
             100,
@@ -484,7 +484,7 @@ mod tests {
             network_id.clone(),
             subject.peer_id(),
             vec!["control.access".to_string()],
-            vec![ProtocolId::new("/quicnet/control/1").expect("protocol")],
+            vec![ProtocolId::new("/quip/control/1").expect("protocol")],
             ResourceLimits::default(),
             vec![],
             100,
@@ -670,7 +670,7 @@ mod tests {
             300,
             vec!["member".to_string()],
         );
-        let protocol = model::ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let protocol = model::ProtocolId::new("/quip/control/1").expect("protocol");
         let current = AuthorityArtifactSnapshot {
             network_id: network_id.clone(),
             enrollment_token: None,
@@ -693,7 +693,7 @@ mod tests {
                     network_id.clone(),
                     subject.peer_id(),
                     vec!["records.publish".to_string()],
-                    vec![model::ProtocolId::new("/quicnet/records/1").expect("protocol")],
+                    vec![model::ProtocolId::new("/quip/records/1").expect("protocol")],
                     membership::ResourceLimits::default(),
                     vec![],
                     100,

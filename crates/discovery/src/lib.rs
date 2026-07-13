@@ -113,7 +113,7 @@ mod tests {
         let service = DiscoveryService::with_bootstrap(vec![BootstrapHint {
             peer: peer("seed-1"),
             addresses: vec!["udp://198.51.100.10:4242".into()],
-            protocols: vec!["/quicnet/control/1".into()],
+            protocols: vec!["/quip/control/1".into()],
         }]);
         let mut store = PeerStore::default();
 

@@ -67,6 +67,17 @@ Baseline procedure:
 
 State reset is not identity rotation. If the identity file changes, the operator is doing a different operation.
 
+## Durable State Migration
+
+Use durable state migration when the node still has a valid durable identity and network file, but `state.json` is on an older supported schema and must be rewritten before the current daemon contract will accept it.
+
+Baseline procedure:
+1. Stop `quipd`.
+2. Run `quip state validate` and confirm the file is rejected because migration is required rather than because the file is corrupted.
+3. Run `quip state migrate --confirm` to rewrite `~/.quip/net/state.json` in place to the current schema.
+4. Run `quip state validate` again and confirm the migrated file is valid.
+5. Restart `quipd`.
+
 ## Identity Rotation
 
 Identity rotation means intentionally replacing the node's identity.

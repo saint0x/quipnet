@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "name": "state-recovery-smoke",
+  "steps": [
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "durable_state_v1_requires_explicit_migration"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "migrate_durable_state_file_rewrites_legacy_protocols_and_bumps_schema"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "reset_network_state_removes_only_durable_state_file"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quip", "migrate_confirmation_error_mentions_daemon_shutdown_requirement"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    }
+  ]
+}

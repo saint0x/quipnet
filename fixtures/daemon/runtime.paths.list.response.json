@@ -7,7 +7,7 @@
       {
         "session_id": "9f10f8e8f34137b1eecce5e7ab9e843a",
         "peer_id": "ed25519:active-peer",
-        "protocol": "/quicnet/control/1",
+        "protocol": "/quip/control/1",
         "class": "control",
         "state": "active",
         "path_class": "relay",
@@ -31,7 +31,7 @@
       {
         "session_id": null,
         "peer_id": "ed25519:suppressed-peer",
-        "protocol": "/quicnet/control/1",
+        "protocol": "/quip/control/1",
         "class": "interactive",
         "state": "suppressed",
         "path_class": "relay",
@@ -39,7 +39,7 @@
         "relay_peer_id": "ed25519:relay-peer",
         "endpoint_summary": "relay=ed25519:relay-peer",
         "score": 61,
-        "state_reason": "no active capability grants for /quicnet/control/1",
+        "state_reason": "no active capability grants for /quip/control/1",
         "decision_reason": "authority relay remains the best known route even though reconnect is suppressed by policy",
         "summary": "reconnect suppressed for ed25519:suppressed-peer: Relay routing for ed25519:suppressed-peer via ed25519:relay-peer from AuthorityRelay scores 61 for Interactive traffic",
         "alternatives": []

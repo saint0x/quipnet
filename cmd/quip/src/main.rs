@@ -196,6 +196,10 @@ enum StateCommand {
         overwrite: bool,
     },
     Validate,
+    Migrate {
+        #[arg(long)]
+        confirm: bool,
+    },
     Restore {
         #[arg(long)]
         input: String,
@@ -998,6 +1002,32 @@ async fn run() -> Result<(), Box<dyn Error>> {
                             .join(";")
                     },
                     report.truth_kind
+                );
+            }
+            StateCommand::Migrate { confirm } => {
+                if !confirm {
+                    return Err(usage_error(
+                        "state migrate is destructive; rerun with --confirm after stopping quipd to rewrite durable network state to the current schema",
+                    )
+                    .into());
+                }
+                if daemon_endpoint_is_live(&cli)? {
+                    return Err(usage_error(
+                        "state migrate requires quipd to be stopped before durable state is rewritten in place",
+                    )
+                    .into());
+                }
+                let report = fabric::migrate_durable_state_file(&cli.state_path)?;
+                println!(
+                    "state_path={} from_schema_version={} to_schema_version={} migrated_fields={}",
+                    report.state_path.display(),
+                    report.from_schema_version,
+                    report.to_schema_version,
+                    if report.migrated_fields.is_empty() {
+                        "none".to_string()
+                    } else {
+                        report.migrated_fields.join(",")
+                    }
                 );
             }
             StateCommand::Restore {
@@ -2109,7 +2139,7 @@ mod tests {
             &RuntimePathEntry {
                 session_id: Some("abcd".to_string()),
                 peer_id: "ed25519:test-peer".to_string(),
-                protocol: Some("/quicnet/control/1".to_string()),
+                protocol: Some("/quip/control/1".to_string()),
                 class: "control".to_string(),
                 state: "active".to_string(),
                 path_class: "relay".to_string(),
@@ -2145,8 +2175,8 @@ mod tests {
             &RuntimeListenerEntry {
                 listener_id: "lst-1234".to_string(),
                 transport: "quic".to_string(),
-                bind_summary: "protocol=/quicnet/control/1 advertise=true".to_string(),
-                protocol: "/quicnet/control/1".to_string(),
+                bind_summary: "protocol=/quip/control/1 advertise=true".to_string(),
+                protocol: "/quip/control/1".to_string(),
                 advertise: true,
                 state: "active".to_string(),
                 state_reason: None,
@@ -2166,7 +2196,7 @@ mod tests {
             RuntimePathEntry {
                 session_id: Some("sess-1".to_string()),
                 peer_id: "peer-a".to_string(),
-                protocol: Some("/quicnet/control/1".to_string()),
+                protocol: Some("/quip/control/1".to_string()),
                 class: "control".to_string(),
                 state: "active".to_string(),
                 path_class: "direct".to_string(),
@@ -2182,7 +2212,7 @@ mod tests {
             RuntimePathEntry {
                 session_id: None,
                 peer_id: "peer-b".to_string(),
-                protocol: Some("/quicnet/control/1".to_string()),
+                protocol: Some("/quip/control/1".to_string()),
                 class: "interactive".to_string(),
                 state: "suppressed".to_string(),
                 path_class: "relay".to_string(),
@@ -2305,6 +2335,17 @@ mod tests {
 
         assert!(error.to_string().contains("--confirm"));
         assert!(error.to_string().contains("stopping quipd"));
+    }
+
+    #[test]
+    fn migrate_confirmation_error_mentions_daemon_shutdown_requirement() {
+        let error = usage_error(
+            "state migrate is destructive; rerun with --confirm after stopping quipd to rewrite durable network state to the current schema",
+        );
+
+        assert!(error.to_string().contains("--confirm"));
+        assert!(error.to_string().contains("stopping quipd"));
+        assert!(error.to_string().contains("current schema"));
     }
 
     #[test]
@@ -2516,7 +2557,7 @@ mod tests {
         let paths = vec![daemonapi::RuntimePathEntry {
             session_id: Some("sess-1".to_string()),
             peer_id: "peer-b".to_string(),
-            protocol: Some("/quicnet/control/1".to_string()),
+            protocol: Some("/quip/control/1".to_string()),
             class: "interactive".to_string(),
             state: "failed".to_string(),
             path_class: "relay".to_string(),

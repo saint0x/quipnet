@@ -12,7 +12,7 @@
         "subject_kind": "listener",
         "subject_id": "listener-0100",
         "details": {
-          "protocol": "/quicnet/control/1",
+          "protocol": "/quip/control/1",
           "class": "interactive",
           "prior_reason": "policy denied reconnect"
         }

@@ -144,6 +144,11 @@ Any durable state migration should:
 - reject unsupported or ambiguous state
 - write back only fields allowed by the new schema contract
 
+The operator-facing migration path should stay explicit:
+- stop `quipd`
+- run `quip state migrate --confirm`
+- validate the rewritten durable state before restart
+
 Migration should never blindly preserve legacy fields just because they already exist on disk.
 
 ## Relationship To The Daemon API

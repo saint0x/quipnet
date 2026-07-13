@@ -4,6 +4,8 @@
     {
       "id": "trace-clean-bootstrap",
       "scenario": "clean-bootstrap",
+      "scenario_path": "tests/integration/scenarios/local-smoke.fozzy.json",
+      "trace_path": "verification/fozzy/local-smoke.trace.fozzy",
       "required_steps": [
         "record",
         "trace_verify_strict",
@@ -14,6 +16,8 @@
     {
       "id": "trace-restart-preserved-identity",
       "scenario": "restart-preserved-identity",
+      "scenario_path": "tests/integration/scenarios/restart-smoke.fozzy.json",
+      "trace_path": "verification/fozzy/restart-smoke.trace.fozzy",
       "required_steps": [
         "record",
         "trace_verify_strict",
@@ -24,6 +28,8 @@
     {
       "id": "trace-revocation-enforcement",
       "scenario": "revocation-enforcement",
+      "scenario_path": "tests/integration/scenarios/authority-reevaluation-smoke.fozzy.json",
+      "trace_path": "verification/fozzy/authority-reevaluation.trace.fozzy",
       "required_steps": [
         "record",
         "trace_verify_strict",
@@ -34,6 +40,8 @@
     {
       "id": "trace-reconnect-after-drop",
       "scenario": "reconnect-after-drop",
+      "scenario_path": "tests/integration/scenarios/reconnect-smoke.fozzy.json",
+      "trace_path": "verification/fozzy/reconnect-smoke.trace.fozzy",
       "required_steps": [
         "record",
         "trace_verify_strict",
@@ -44,6 +52,8 @@
     {
       "id": "trace-runtime-diagnosis",
       "scenario": "runtime-diagnosis",
+      "scenario_path": "tests/integration/scenarios/runtime-diagnosis-smoke.fozzy.json",
+      "trace_path": "verification/fozzy/runtime-diagnosis.trace.fozzy",
       "required_steps": [
         "record",
         "trace_verify_strict",
@@ -54,6 +64,8 @@
     {
       "id": "trace-relay-or-migration",
       "scenario": "relay-fallback",
+      "scenario_path": "tests/integration/scenarios/relay-migration-smoke.fozzy.json",
+      "trace_path": "verification/fozzy/relay-migration-smoke.trace.fozzy",
       "alternates": ["path-migration"],
       "required_steps": [
         "record",
@@ -65,6 +77,8 @@
     {
       "id": "trace-backup-and-restore",
       "scenario": "backup-and-restore",
+      "scenario_path": "tests/integration/scenarios/backup-restore-smoke.fozzy.json",
+      "trace_path": "verification/fozzy/backup-restore-smoke.trace.fozzy",
       "required_steps": [
         "record",
         "trace_verify_strict",

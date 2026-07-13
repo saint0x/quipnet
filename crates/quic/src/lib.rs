@@ -824,7 +824,7 @@ fn relay_session_snapshot(
             .protocol
             .as_ref()
             .map(|protocol| vec![protocol.as_str().to_string()])
-            .unwrap_or_else(|| vec!["/quicnet/relay/1".to_string()]),
+            .unwrap_or_else(|| vec!["/quip/relay/1".to_string()]),
         300,
         1,
     );
@@ -1258,7 +1258,7 @@ mod tests {
         let adapter =
             QuicTransportAdapter::with_identity(NetworkId::derive("direct-test"), local_identity);
         let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer");
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         let handle = adapter
             .connect(RoutePlan {
                 local_peer: local,
@@ -1289,7 +1289,7 @@ mod tests {
             .connect(RoutePlan {
                 local_peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"other-local"),
                 peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer"),
-                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
                 class: TrafficClass::Control,
                 path_kind: PathKind::DirectUdp,
                 source: RouteSource::Observed,
@@ -1307,7 +1307,7 @@ mod tests {
     #[tokio::test]
     async fn adapter_returns_listener_metadata() {
         let adapter = QuicTransportAdapter::default();
-        let protocol = ProtocolId::new("/quicnet/relay/1").unwrap();
+        let protocol = ProtocolId::new("/quip/relay/1").unwrap();
         let handle = adapter
             .listen(BindSpec {
                 protocol,
@@ -1316,14 +1316,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(handle.protocol, "/quicnet/relay/1");
+        assert_eq!(handle.protocol, "/quip/relay/1");
         assert!(handle.advertise);
         let listeners = adapter
             .active_listeners()
             .expect("listener registry should load");
         assert_eq!(listeners.len(), 1);
         assert_eq!(listeners[0].transport, "quic");
-        assert_eq!(listeners[0].protocol.as_str(), "/quicnet/relay/1");
+        assert_eq!(listeners[0].protocol.as_str(), "/quip/relay/1");
         assert_eq!(listeners[0].state, RuntimeListenerState::Active);
         assert!(listeners[0]
             .bind_summary
@@ -1341,7 +1341,7 @@ mod tests {
         let adapter_b =
             QuicTransportAdapter::with_identity(NetworkId::derive("restart-test"), local_identity);
         let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"restart-peer");
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         let route = RoutePlan {
             local_peer: local,
             peer,
@@ -1424,7 +1424,7 @@ mod tests {
             }],
             destinations: vec![relay::RelayDestination {
                 peer: destination.clone(),
-                protocols: vec![ProtocolId::new("/quicnet/control/1").unwrap()],
+                protocols: vec![ProtocolId::new("/quip/control/1").unwrap()],
             }],
         }));
         let adapter =
@@ -1434,7 +1434,7 @@ mod tests {
             .connect(RoutePlan {
                 local_peer: local,
                 peer: destination.clone(),
-                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
                 class: TrafficClass::Interactive,
                 path_kind: PathKind::Relay,
                 source: RouteSource::AuthorityRelay,
@@ -1467,7 +1467,7 @@ mod tests {
         let adapter =
             QuicTransportAdapter::with_identity(NetworkId::derive("events-test"), local_identity);
         let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer-events");
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         let handle = adapter
             .connect(RoutePlan {
                 local_peer: local,
@@ -1514,7 +1514,7 @@ mod tests {
             local_identity,
         );
         let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer-suppressed");
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         adapter
             .suppress_reconnect(
                 &peer,
@@ -1548,7 +1548,7 @@ mod tests {
     #[tokio::test]
     async fn adapter_transport_health_tracks_listeners_and_suppressions() {
         let adapter = QuicTransportAdapter::default();
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         adapter
             .listen(BindSpec {
                 protocol: protocol.clone(),
@@ -1581,7 +1581,7 @@ mod tests {
     async fn adapter_tracks_reconnect_attempt_backoff_and_clear() {
         let adapter = QuicTransportAdapter::default();
         let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"reconnect-peer");
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
 
         let scheduled = adapter
             .schedule_reconnect(
@@ -1652,7 +1652,7 @@ mod tests {
     async fn adapter_emits_unsuppressed_event_when_reconnect_suppression_clears() {
         let adapter = QuicTransportAdapter::default();
         let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"reconnect-unsuppressed-peer");
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
 
         adapter
             .suppress_reconnect(
@@ -1703,7 +1703,7 @@ mod tests {
             .connect(RoutePlan {
                 local_peer: local,
                 peer: destination,
-                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
                 class: TrafficClass::Control,
                 path_kind: PathKind::Relay,
                 source: RouteSource::AuthorityRelay,
@@ -1730,7 +1730,7 @@ mod tests {
         let relay = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-close");
         let local_identity = IdentityKeypair::from_secret_bytes([63_u8; 32]);
         let local = local_identity.peer_id();
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         clear_registry();
         register_relay(RelayService::new(RelayNode {
             announcement: relaywire::RelayAnnouncement {
@@ -1797,7 +1797,7 @@ mod tests {
             .connect(RoutePlan {
                 local_peer: local,
                 peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"terminal-history-peer"),
-                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
                 class: TrafficClass::Interactive,
                 path_kind: PathKind::DirectUdp,
                 source: RouteSource::Observed,
@@ -1850,7 +1850,7 @@ mod tests {
         let relay = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-migrate");
         let local_identity = IdentityKeypair::from_secret_bytes([64_u8; 32]);
         let local = local_identity.peer_id();
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         clear_registry();
         register_relay(RelayService::new(RelayNode {
             announcement: relaywire::RelayAnnouncement {
@@ -1949,7 +1949,7 @@ mod tests {
             transport_session_id: [8_u8; 16],
             relay_attempt_id: None,
             peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer-missing"),
-            protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+            protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
             class: TrafficClass::Control,
             path_kind: PathKind::DirectUdp,
             source: RouteSource::Observed,

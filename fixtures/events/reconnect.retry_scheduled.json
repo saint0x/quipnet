@@ -8,7 +8,7 @@
     "id": "ed25519:reconnect-peer"
   },
   "details": {
-    "protocol": "/quicnet/control/1",
+    "protocol": "/quip/control/1",
     "class": "interactive",
     "state": "backing_off",
     "attempt_count": 2,

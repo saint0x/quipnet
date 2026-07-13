@@ -478,7 +478,7 @@ fn fixture_artifacts(network: &str, realm: &str) -> FixtureArtifacts {
                     ("priority".to_string(), "1".to_string()),
                     (
                         "protocols".to_string(),
-                        "/quicnet/control/1,/quicnet/records/1".to_string(),
+                        "/quip/control/1,/quip/records/1".to_string(),
                     ),
                 ]),
             },
@@ -498,7 +498,7 @@ fn fixture_artifacts(network: &str, realm: &str) -> FixtureArtifacts {
         network_id.clone(),
         subject.peer_id(),
         vec!["records.publish".to_string(), "records.read".to_string()],
-        parse_protocols(vec!["/quicnet/records/1".to_string()]),
+        parse_protocols(vec!["/quip/records/1".to_string()]),
         ResourceLimits {
             bandwidth_bps: Some(25_000_000),
             concurrent_streams: Some(64),
@@ -993,7 +993,7 @@ fn normalize_capabilities(capabilities: Vec<String>) -> Vec<String> {
 
 fn parse_protocols(protocols: Vec<String>) -> Vec<ProtocolId> {
     let values = if protocols.is_empty() {
-        vec!["/quicnet/records/1".to_string()]
+        vec!["/quip/records/1".to_string()]
     } else {
         protocols
     };

@@ -116,6 +116,7 @@ Candidate subcommands:
 - `quip state validate`
 - `quip state backup`
 - `quip state export`
+- `quip state migrate`
 - `quip state restore`
 - `quip state reset`
 
@@ -177,6 +178,7 @@ Before this surface is complete, we need at least:
 - `quip state validate`
 - `quip state backup`
 - `quip state export`
+- `quip state migrate`
 - `quip state restore`
 - `quip state reset`
 

@@ -542,7 +542,7 @@ mod tests {
             network_id.clone(),
             subject.peer_id(),
             vec!["records.publish".to_string()],
-            vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+            vec![ProtocolId::new("/quip/records/1").expect("protocol")],
             ResourceLimits::default(),
             vec![],
             150,

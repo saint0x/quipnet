@@ -792,7 +792,7 @@ mod tests {
                 session_id,
                 source,
                 destination,
-                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
                 traffic_class: TrafficClass::Interactive,
             }))
             .unwrap();
@@ -832,14 +832,14 @@ mod tests {
             }],
             destinations: vec![RelayDestination {
                 peer: destination.clone(),
-                protocols: vec![ProtocolId::new("/quicnet/control/1").unwrap()],
+                protocols: vec![ProtocolId::new("/quip/control/1").unwrap()],
             }],
         }));
         let credential = identity::SessionCredential::issue(
             NetworkId::derive("test-network"),
             &source_identity,
             [9_u8; 32],
-            vec!["/quicnet/control/1".to_string()],
+            vec!["/quip/control/1".to_string()],
             60,
             1,
         );
@@ -853,7 +853,7 @@ mod tests {
                 source_public_key: source_identity.public_key(),
                 source_credential: credential,
                 destination: destination.clone(),
-                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
                 traffic_class: TrafficClass::Control,
             },
         )
@@ -886,14 +886,14 @@ mod tests {
             quotas: Vec::new(),
             destinations: vec![RelayDestination {
                 peer: destination.clone(),
-                protocols: vec![ProtocolId::new("/quicnet/records/1").unwrap()],
+                protocols: vec![ProtocolId::new("/quip/records/1").unwrap()],
             }],
         }));
         let credential = identity::SessionCredential::issue(
             NetworkId::derive("test-network"),
             &source_identity,
             [7_u8; 32],
-            vec!["/quicnet/records/1".to_string()],
+            vec!["/quip/records/1".to_string()],
             60,
             1,
         );
@@ -907,7 +907,7 @@ mod tests {
                 source_public_key: source_identity.public_key(),
                 source_credential: credential,
                 destination,
-                protocol: Some(ProtocolId::new("/quicnet/records/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/records/1").unwrap()),
                 traffic_class: TrafficClass::Bulk,
             },
         );
@@ -943,7 +943,7 @@ mod tests {
             NetworkId::derive("test-network"),
             &source_identity,
             [5_u8; 32],
-            vec!["/quicnet/control/1".to_string()],
+            vec!["/quip/control/1".to_string()],
             60,
             1,
         );
@@ -957,7 +957,7 @@ mod tests {
                 source_public_key: source_identity.public_key(),
                 source_credential: credential,
                 destination: destination.clone(),
-                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                protocol: Some(ProtocolId::new("/quip/control/1").unwrap()),
                 traffic_class: TrafficClass::Control,
             },
         );
@@ -973,7 +973,7 @@ mod tests {
         let source_identity = IdentityKeypair::from_secret_bytes([61_u8; 32]);
         let source = source_identity.peer_id();
         let destination = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"destination-http");
-        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        let protocol = ProtocolId::new("/quip/control/1").unwrap();
         let credential = identity::SessionCredential::issue(
             NetworkId::derive("test-network"),
             &source_identity,

@@ -15,5 +15,7 @@ Current artifacts:
   - required recorded-trace set
 - `release-gate.json`
   - machine-readable release verification expectations
+- `run-release-gate.sh`
+  - local script that executes the concrete Fozzy release gate against the catalog and trace set
 
-These files should eventually drive real `fozzy doctor`, `fozzy test`, `fozzy run`, `fozzy replay`, `fozzy trace verify`, and `fozzy ci` invocations.
+These files drive real `fozzy doctor`, `fozzy test`, `fozzy run`, `fozzy replay`, `fozzy trace verify`, and `fozzy ci` invocations.

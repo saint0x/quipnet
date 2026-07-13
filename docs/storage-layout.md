@@ -1,6 +1,6 @@
 # Quip Storage Layout
 
-All durable local node data belongs under `~/.quip/`. No component should create or depend on a nested product directory such as `~/.quip/quicnet/` or any similar product-nested variant.
+All durable local node data belongs under `~/.quip/`. No component should create or depend on a nested product directory such as `~/.quip/product/` or any similar product-nested variant.
 
 ## Canonical Concern Directories
 

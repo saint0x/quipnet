@@ -37,7 +37,7 @@ The minimum durable split is:
 - `~/.quip/identity/node.json`
 - `~/.quip/net/state.json`
 
-We do not want product-nested layouts like `~/.quip/quicnet/`. Storage is organized by concern, not by legacy product name.
+We do not want product-nested layouts like `~/.quip/product/`. Storage is organized by concern, not by legacy product name.
 
 The full storage contract is in [docs/storage-layout.md](docs/storage-layout.md).
 Backup and restore handling is in [docs/backup-and-restore.md](docs/backup-and-restore.md).

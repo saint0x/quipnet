@@ -7,8 +7,8 @@ use data_encoding::BASE32_NOPAD;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const NETWORK_ID_DOMAIN: &[u8] = b"quicnet:network-id:v1";
-const CONTENT_ID_DOMAIN: &[u8] = b"quicnet:content-id:v1";
+const NETWORK_ID_DOMAIN: &[u8] = b"quip:network-id:v1";
+const CONTENT_ID_DOMAIN: &[u8] = b"quip:content-id:v1";
 const BLAKE3_256_MULTIHASH_CODE: u64 = 0x1E;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,8 +249,8 @@ mod tests {
 
     #[test]
     fn protocol_ids_must_be_namespaced() {
-        assert!(ProtocolId::new("quicnet").is_err());
-        assert!(ProtocolId::new("/quicnet").is_err());
-        assert!(ProtocolId::new("/quicnet/records/1").is_ok());
+        assert!(ProtocolId::new("quip").is_err());
+        assert!(ProtocolId::new("/quip").is_err());
+        assert!(ProtocolId::new("/quip/records/1").is_ok());
     }
 }

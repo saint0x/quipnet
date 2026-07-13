@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn ed25519_signatures_verify() {
         let keypair = IdentityKeypair::generate(&mut OsRng);
-        let payload = b"quicnet-signed-payload";
+        let payload = b"quip-signed-payload";
         let signature = keypair.sign(payload);
         signature
             .verify(&keypair.public_key(), payload)

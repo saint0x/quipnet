@@ -40,7 +40,7 @@ The service persists state under `~quip/.quip/`, which maps to `/var/lib/quip/.q
 
 ## Docker
 
-[`deploy/docker/Dockerfile`](../deploy/docker/Dockerfile) and [`deploy/docker/docker-compose.dev.yaml`](../deploy/docker/docker-compose.dev.yaml) mount `~quip/.quip/` and pass the same bootstrap variables into the container. For production, replace the development passphrase placeholder and inject the secret from your container platform rather than committing it into Compose files. Do not reintroduce `~/.quip/quicnet/` inside the container image or mounted volume layout.
+[`deploy/docker/Dockerfile`](../deploy/docker/Dockerfile) and [`deploy/docker/docker-compose.dev.yaml`](../deploy/docker/docker-compose.dev.yaml) mount `~quip/.quip/` and pass the same bootstrap variables into the container. For production, replace the development passphrase placeholder and inject the secret from your container platform rather than committing it into Compose files. Do not reintroduce `~/.quip/quip/` inside the container image or mounted volume layout.
 
 ## Kubernetes
 

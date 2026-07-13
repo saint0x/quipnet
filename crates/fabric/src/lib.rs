@@ -34,7 +34,8 @@ pub use routing::{
 pub use scheduler::*;
 pub use transport::*;
 
-pub const DAEMON_STATE_SCHEMA_VERSION: u64 = 1;
+pub const DAEMON_STATE_SCHEMA_VERSION: u64 = 2;
+pub const MIN_MIGRATABLE_DAEMON_STATE_SCHEMA_VERSION: u64 = 1;
 pub const BACKUP_BUNDLE_FORMAT_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +89,10 @@ pub enum DaemonStateError {
     InvalidSession(String),
     #[error("durable state schema version is missing")]
     MissingSchemaVersion,
+    #[error(
+        "durable state schema version {found} requires explicit migration before use; target schema is {target}"
+    )]
+    MigrationRequired { found: u64, target: u64 },
     #[error("durable state schema version {found} is unsupported; expected {expected}")]
     UnsupportedSchemaVersion { found: u64, expected: u64 },
     #[error("durable state contains unsupported field `{0}`")]
@@ -390,6 +395,14 @@ pub struct DurableStateInspectionReport {
     pub valid: bool,
     pub violations: Vec<DurableStateViolation>,
     pub summary: Option<DurableStateSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableStateMigrationReport {
+    pub state_path: PathBuf,
+    pub from_schema_version: u64,
+    pub to_schema_version: u64,
+    pub migrated_fields: Vec<String>,
 }
 
 impl DaemonState {
@@ -802,6 +815,12 @@ fn durable_state_violations_from_error(error: &DaemonStateError) -> Vec<DurableS
                 error.to_string(),
             )]
         }
+        DaemonStateError::MigrationRequired { .. } => {
+            vec![durable_state_violation(
+                "$.schema_version",
+                error.to_string(),
+            )]
+        }
         DaemonStateError::UnsupportedSchemaVersion { .. } => {
             vec![durable_state_violation(
                 "$.schema_version",
@@ -904,6 +923,29 @@ pub fn validate_durable_state_file(
         valid: report.valid,
         violations: report.violations,
         summary: None,
+    })
+}
+
+pub fn migrate_durable_state_file(
+    path: impl AsRef<Path>,
+) -> Result<DurableStateMigrationReport, DaemonStateError> {
+    let path = path.as_ref();
+    let bytes = fs::read(path)?;
+    let value = serde_json::from_slice::<Value>(&bytes)?;
+    let from_schema_version =
+        durable_state_schema_version(&value).ok_or(DaemonStateError::MissingSchemaVersion)?;
+    let mut migrated_fields = Vec::new();
+    let migrated = migrate_durable_state_value_with_report(value, &mut migrated_fields)?;
+    validate_durable_state_value(&migrated)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(&migrated)?)?;
+    Ok(DurableStateMigrationReport {
+        state_path: path.to_path_buf(),
+        from_schema_version,
+        to_schema_version: DAEMON_STATE_SCHEMA_VERSION,
+        migrated_fields,
     })
 }
 
@@ -1117,15 +1159,12 @@ impl LocalNode {
             BootstrapHint {
                 peer: relay_peer.clone(),
                 addresses: vec!["udp://203.0.113.10:443".to_string()],
-                protocols: vec!["/quicnet/relay/1".to_string()],
+                protocols: vec!["/quip/relay/1".to_string()],
             },
             BootstrapHint {
                 peer: worker_peer.clone(),
                 addresses: vec!["udp://198.51.100.24:8443".to_string()],
-                protocols: vec![
-                    "/quicnet/control/1".to_string(),
-                    "/quicnet/records/1".to_string(),
-                ],
+                protocols: vec!["/quip/control/1".to_string(), "/quip/records/1".to_string()],
             },
         ];
 
@@ -1135,10 +1174,7 @@ impl LocalNode {
         peer_store.upsert_peer_with_status(
             PeerSnapshot {
                 peer: worker_peer.clone(),
-                protocols: vec![
-                    "/quicnet/control/1".to_string(),
-                    "/quicnet/records/1".to_string(),
-                ],
+                protocols: vec!["/quip/control/1".to_string(), "/quip/records/1".to_string()],
                 addresses: vec!["udp://198.51.100.24:8443".to_string()],
             },
             PeerStatus {
@@ -1301,6 +1337,14 @@ fn validate_durable_state_value(value: &Value) -> Result<(), DaemonStateError> {
                 "durable state schema version must be an unsigned integer".to_string(),
             )
         })?;
+    if schema_version < DAEMON_STATE_SCHEMA_VERSION
+        && schema_version >= MIN_MIGRATABLE_DAEMON_STATE_SCHEMA_VERSION
+    {
+        return Err(DaemonStateError::MigrationRequired {
+            found: schema_version,
+            target: DAEMON_STATE_SCHEMA_VERSION,
+        });
+    }
     if schema_version != DAEMON_STATE_SCHEMA_VERSION {
         return Err(DaemonStateError::UnsupportedSchemaVersion {
             found: schema_version,
@@ -1331,6 +1375,73 @@ fn validate_durable_state_value(value: &Value) -> Result<(), DaemonStateError> {
     }
 
     Ok(())
+}
+
+fn migrate_durable_state_value_with_report(
+    mut value: Value,
+    migrated_fields: &mut Vec<String>,
+) -> Result<Value, DaemonStateError> {
+    let Some(schema_version) = durable_state_schema_version(&value) else {
+        return Err(DaemonStateError::MissingSchemaVersion);
+    };
+    if schema_version == DAEMON_STATE_SCHEMA_VERSION {
+        return Ok(value);
+    }
+    if schema_version < MIN_MIGRATABLE_DAEMON_STATE_SCHEMA_VERSION
+        || schema_version > DAEMON_STATE_SCHEMA_VERSION
+    {
+        return Err(DaemonStateError::UnsupportedSchemaVersion {
+            found: schema_version,
+            expected: DAEMON_STATE_SCHEMA_VERSION,
+        });
+    }
+    match schema_version {
+        1 => {
+            rewrite_legacy_protocols(&mut value, "$", migrated_fields);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "schema_version".to_string(),
+                    Value::Number(serde_json::Number::from(DAEMON_STATE_SCHEMA_VERSION)),
+                );
+            }
+            migrated_fields.push("$.schema_version".to_string());
+            Ok(value)
+        }
+        _ => Err(DaemonStateError::UnsupportedSchemaVersion {
+            found: schema_version,
+            expected: DAEMON_STATE_SCHEMA_VERSION,
+        }),
+    }
+}
+
+fn rewrite_legacy_protocols(value: &mut Value, path: &str, migrated_fields: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            let mut changed = false;
+            if text.contains("/quip/") {
+                *text = text.replace("/quip/", "/quip/");
+                changed = true;
+            }
+            if text.contains("quip:") {
+                *text = text.replace("quip:", "quip:");
+                changed = true;
+            }
+            if changed {
+                migrated_fields.push(path.to_string());
+            }
+        }
+        Value::Array(values) => {
+            for (index, entry) in values.iter_mut().enumerate() {
+                rewrite_legacy_protocols(entry, &format!("{path}[{index}]"), migrated_fields);
+            }
+        }
+        Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                rewrite_legacy_protocols(entry, &format!("{path}.{key}"), migrated_fields);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug)]
@@ -2636,12 +2747,7 @@ fn bootstrap_protocols(metadata: &BTreeMap<String, String>) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| {
-            vec![
-                "/quicnet/control/1".to_string(),
-                "/quicnet/records/1".to_string(),
-            ]
-        })
+        .unwrap_or_else(|| vec!["/quip/control/1".to_string(), "/quip/records/1".to_string()])
 }
 
 fn bootstrap_endpoint_from_hint(hint: membership::BootstrapHint) -> BootstrapEndpoint {
@@ -2714,7 +2820,7 @@ fn relay_peers(relay_map: &RelayMap) -> Vec<PeerInspection> {
         store.upsert_peer_with_status(
             PeerSnapshot {
                 peer: relay.peer_id.clone(),
-                protocols: vec!["/quicnet/relay/1".to_string()],
+                protocols: vec!["/quip/relay/1".to_string()],
                 addresses: relay.advertised_endpoints.clone(),
             },
             PeerStatus {
@@ -3335,8 +3441,8 @@ fn denied_peers(
 
 fn protocol_capability(protocol: &ProtocolId) -> String {
     match protocol.as_str() {
-        "/quicnet/records/1" => "records.publish".to_string(),
-        "/quicnet/control/1" => "control.access".to_string(),
+        "/quip/records/1" => "records.publish".to_string(),
+        "/quip/control/1" => "control.access".to_string(),
         _ => format!("protocol:{}", protocol.as_str()),
     }
 }
@@ -3404,7 +3510,7 @@ mod tests {
         let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, bootstrap_label);
         let authority = crypto::IdentityKeypair::from_secret_bytes([authority_seed; 32]);
         let subject = crypto::IdentityKeypair::from_secret_bytes([subject_seed; 32]);
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol");
         let snapshot = AuthorityArtifactSnapshot {
             network_id: NetworkId::derive(network),
             enrollment_token: None,
@@ -3434,7 +3540,7 @@ mod tests {
                 addresses: vec!["quic://198.51.100.77:8443".to_string()],
                 metadata: BTreeMap::from([(
                     "protocols".to_string(),
-                    "/quicnet/control/1".to_string(),
+                    "/quip/control/1".to_string(),
                 )]),
             }],
         };
@@ -3512,7 +3618,7 @@ mod tests {
         let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, bootstrap_label);
         let authority = crypto::IdentityKeypair::from_secret_bytes([authority_seed; 32]);
         let subject = crypto::IdentityKeypair::from_secret_bytes([subject_seed; 32]);
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol");
         let snapshot = AuthorityArtifactSnapshot {
             network_id: NetworkId::derive(network),
             enrollment_token: None,
@@ -3542,7 +3648,7 @@ mod tests {
                 addresses: vec!["quic://198.51.100.77:8443".to_string()],
                 metadata: BTreeMap::from([(
                     "protocols".to_string(),
-                    "/quicnet/control/1".to_string(),
+                    "/quip/control/1".to_string(),
                 )]),
             }],
         };
@@ -3593,7 +3699,7 @@ mod tests {
             .expect("fixture routing candidate should exist")
             .peer
             .clone();
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol");
 
         let route = state
             .route_plan(&peer, Some(protocol.clone()), TrafficClass::Interactive)
@@ -3611,7 +3717,7 @@ mod tests {
 
     #[test]
     fn control_plane_persists_state() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-state.json");
+        let temp = std::env::temp_dir().join("quip-fabric-state.json");
         let control = LocalControlPlane::new(DaemonConfig::new("dev", &temp));
         let state = control.ensure_state().expect("state should be created");
         assert_eq!(state.network, "dev");
@@ -3625,7 +3731,7 @@ mod tests {
 
     #[test]
     fn ensure_state_for_local_identity_bootstraps_matching_peer() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-bound-state.json");
+        let temp = std::env::temp_dir().join("quip-fabric-bound-state.json");
         let control = LocalControlPlane::new(DaemonConfig::new("dev", &temp));
         let local_identity = crypto::IdentityKeypair::from_secret_bytes([88_u8; 32]);
 
@@ -3640,7 +3746,7 @@ mod tests {
 
     #[test]
     fn ensure_identity_bound_state_rejects_mismatched_runtime_identity() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-bound-mismatch.json");
+        let temp = std::env::temp_dir().join("quip-fabric-bound-mismatch.json");
         let control = LocalControlPlane::new(DaemonConfig::new("dev", &temp));
         let state = fixture_daemon_state("dev");
         state.save(&temp).expect("fixture state should persist");
@@ -3658,7 +3764,7 @@ mod tests {
 
     #[test]
     fn durable_state_requires_schema_version() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-missing-schema-version.json");
+        let temp = std::env::temp_dir().join("quip-fabric-missing-schema-version.json");
         std::fs::write(
             &temp,
             r#"{
@@ -3694,7 +3800,7 @@ mod tests {
 
     #[test]
     fn durable_state_rejects_unsupported_schema_version() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-unsupported-schema-version.json");
+        let temp = std::env::temp_dir().join("quip-fabric-unsupported-schema-version.json");
         let mut value = serde_json::to_value(fixture_daemon_state("unsupported-schema-version"))
             .expect("fixture state should serialize");
         value["schema_version"] = serde_json::json!(99);
@@ -3713,8 +3819,67 @@ mod tests {
     }
 
     #[test]
+    fn durable_state_v1_requires_explicit_migration() {
+        let temp = std::env::temp_dir().join("quip-fabric-migration-required.json");
+        let mut value =
+            serde_json::to_value(fixture_daemon_state("migration-required")).expect("serialize");
+        value["schema_version"] = serde_json::json!(1);
+        value["bootstrap"][0]["metadata"]["protocols"] =
+            serde_json::json!("/quip/control/1,/quip/records/1");
+        std::fs::write(&temp, serde_json::to_vec_pretty(&value).expect("serialize"))
+            .expect("fixture should persist");
+
+        let report = validate_durable_state_file(&temp).expect("validation should succeed");
+        assert!(!report.valid);
+        assert!(report.violations.iter().any(|violation| {
+            violation.path == "$.schema_version"
+                && violation.message.contains("requires explicit migration")
+        }));
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn migrate_durable_state_file_rewrites_legacy_protocols_and_bumps_schema() {
+        let temp = std::env::temp_dir().join("quip-fabric-migrate-state.json");
+        let mut value =
+            serde_json::to_value(fixture_daemon_state("migrate-state")).expect("serialize");
+        value["schema_version"] = serde_json::json!(1);
+        value["bootstrap"][0]["metadata"]["protocols"] =
+            serde_json::json!("/quip/control/1,/quip/records/1");
+        value["peers"][0]["snapshot"]["protocols"] =
+            serde_json::json!(["/quip/control/1", "/quip/records/1"]);
+        value["relay_map"]["relays"][0]["traffic_classes"] =
+            serde_json::json!(["NetworkControl", "InteractiveRpc", "Background"]);
+        std::fs::write(&temp, serde_json::to_vec_pretty(&value).expect("serialize"))
+            .expect("fixture should persist");
+
+        let report = migrate_durable_state_file(&temp).expect("migration should succeed");
+        assert_eq!(report.from_schema_version, 1);
+        assert_eq!(report.to_schema_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert!(!report.migrated_fields.is_empty());
+
+        let migrated = serde_json::from_slice::<Value>(&std::fs::read(&temp).expect("read"))
+            .expect("migrated state should parse");
+        assert_eq!(
+            migrated["schema_version"],
+            serde_json::json!(DAEMON_STATE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            migrated["bootstrap"][0]["metadata"]["protocols"],
+            serde_json::json!("/quip/control/1,/quip/records/1")
+        );
+        assert_eq!(
+            migrated["peers"][0]["snapshot"]["protocols"],
+            serde_json::json!(["/quip/control/1", "/quip/records/1"])
+        );
+        let loaded = DaemonState::load(&temp).expect("migrated state should load");
+        assert_eq!(loaded.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
     fn durable_state_rejects_persisted_runtime_sessions() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-persisted-runtime-sessions.json");
+        let temp = std::env::temp_dir().join("quip-fabric-persisted-runtime-sessions.json");
         let mut value = serde_json::to_value(fixture_daemon_state("persisted-runtime-sessions"))
             .expect("fixture state should serialize");
         value["active_sessions"] = serde_json::json!([
@@ -3735,7 +3900,7 @@ mod tests {
 
     #[test]
     fn validate_state_file_reports_schema_version_and_path() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-validate-state.json");
+        let temp = std::env::temp_dir().join("quip-fabric-validate-state.json");
         let state = fixture_daemon_state("validate-state-report");
         state.save(&temp).expect("fixture state should persist");
         let control = LocalControlPlane::new(DaemonConfig::new("validate-state-report", &temp));
@@ -3754,7 +3919,7 @@ mod tests {
 
     #[test]
     fn reset_network_state_removes_only_durable_state_file() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-reset-state.json");
+        let temp = std::env::temp_dir().join("quip-fabric-reset-state.json");
         let control = LocalControlPlane::new(DaemonConfig::new("reset-state-report", &temp));
         let state = fixture_daemon_state("reset-state-report");
         state.save(&temp).expect("fixture state should persist");
@@ -3769,7 +3934,7 @@ mod tests {
 
     #[test]
     fn inspect_state_file_reports_summary_for_valid_state() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-inspect-state.json");
+        let temp = std::env::temp_dir().join("quip-fabric-inspect-state.json");
         let state = fixture_daemon_state("inspect-state-report");
         state.save(&temp).expect("fixture state should persist");
         let control = LocalControlPlane::new(DaemonConfig::new("inspect-state-report", &temp));
@@ -3789,7 +3954,7 @@ mod tests {
 
     #[test]
     fn inspect_state_file_reports_missing_file_without_erroring() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-missing-state.json");
+        let temp = std::env::temp_dir().join("quip-fabric-missing-state.json");
         let control = LocalControlPlane::new(DaemonConfig::new("missing-state-report", &temp));
 
         let report = control
@@ -3805,7 +3970,7 @@ mod tests {
 
     #[test]
     fn validate_state_file_reports_runtime_only_field_violation() {
-        let temp = std::env::temp_dir().join("quicnet-fabric-invalid-runtime-field.json");
+        let temp = std::env::temp_dir().join("quip-fabric-invalid-runtime-field.json");
         let mut value = serde_json::to_value(fixture_daemon_state("invalid-runtime-field"))
             .expect("fixture state should serialize");
         value["active_sessions"] = serde_json::json!([
@@ -3903,7 +4068,7 @@ mod tests {
                 NetworkId::derive(network),
                 bootstrap_peer.clone(),
                 vec!["records.publish".to_string()],
-                vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+                vec![ProtocolId::new("/quip/records/1").expect("protocol")],
                 membership::ResourceLimits::default(),
                 vec![],
                 100,
@@ -3928,7 +4093,7 @@ mod tests {
                     addresses: vec!["quic://203.0.113.10:8443".to_string()],
                     metadata: BTreeMap::from([(
                         "protocols".to_string(),
-                        "/quicnet/control/1,/quicnet/records/1".to_string(),
+                        "/quip/control/1,/quip/records/1".to_string(),
                     )]),
                 },
                 membership::BootstrapHint {
@@ -3953,7 +4118,7 @@ mod tests {
         );
         let decision = state.explain_policy(
             &bootstrap_peer,
-            &ProtocolId::new("/quicnet/records/1").expect("protocol"),
+            &ProtocolId::new("/quip/records/1").expect("protocol"),
         );
         assert!(!decision.allowed);
         assert!(decision.reason.contains("peer revoked"));
@@ -4002,7 +4167,7 @@ mod tests {
                 NetworkId::derive(network),
                 bootstrap_peer.clone(),
                 vec!["records.publish".to_string()],
-                vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+                vec![ProtocolId::new("/quip/records/1").expect("protocol")],
                 membership::ResourceLimits::default(),
                 vec![],
                 100,
@@ -4015,7 +4180,7 @@ mod tests {
                 addresses: vec!["quic://198.51.100.40:8443".to_string()],
                 metadata: BTreeMap::from([(
                     "protocols".to_string(),
-                    "/quicnet/records/1".to_string(),
+                    "/quip/records/1".to_string(),
                 )]),
             }],
         };
@@ -4051,7 +4216,7 @@ mod tests {
         let local = crypto::IdentityKeypair::from_secret_bytes([32_u8; 32]);
         let remote = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"remote-policy-target");
         let network = "personalcloud-prod";
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol");
         let membership = membership::MembershipCertificate::issue(
             &authority,
             NetworkId::derive(network),
@@ -4101,7 +4266,7 @@ mod tests {
             NetworkId::derive(network),
             subject.peer_id(),
             vec!["records.publish".to_string()],
-            vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+            vec![ProtocolId::new("/quip/records/1").expect("protocol")],
             membership::ResourceLimits::default(),
             vec![],
             100,
@@ -4201,7 +4366,7 @@ mod tests {
                 addresses: vec!["quic://198.51.100.77:8443".to_string()],
                 metadata: BTreeMap::from([(
                     "protocols".to_string(),
-                    "/quicnet/control/1".to_string(),
+                    "/quip/control/1".to_string(),
                 )]),
             }],
         };
@@ -4256,7 +4421,7 @@ mod tests {
                 NetworkId::derive(network),
                 bootstrap_peer.clone(),
                 vec!["records.publish".to_string()],
-                vec![ProtocolId::new("/quicnet/control/1").expect("protocol")],
+                vec![ProtocolId::new("/quip/control/1").expect("protocol")],
                 membership::ResourceLimits::default(),
                 vec![],
                 100,
@@ -4269,7 +4434,7 @@ mod tests {
                 addresses: vec!["quic://198.51.100.77:8443".to_string()],
                 metadata: BTreeMap::from([(
                     "protocols".to_string(),
-                    "/quicnet/control/1".to_string(),
+                    "/quip/control/1".to_string(),
                 )]),
             }],
         };
@@ -4294,7 +4459,7 @@ mod tests {
         let route = state
             .route_plan(
                 &bootstrap_peer,
-                Some(ProtocolId::new("/quicnet/control/1").expect("protocol")),
+                Some(ProtocolId::new("/quip/control/1").expect("protocol")),
                 TrafficClass::Control,
             )
             .expect("relay route plan should build");
@@ -4322,7 +4487,7 @@ mod tests {
         let authority = crypto::IdentityKeypair::from_secret_bytes([41_u8; 32]);
         let subject = crypto::IdentityKeypair::from_secret_bytes([42_u8; 32]);
         let network = "relay-runtime-prod";
-        let state_path = unique_state_path("quicnet-relay-runtime-state");
+        let state_path = unique_state_path("quip-relay-runtime-state");
         let snapshot = AuthorityArtifactSnapshot {
             network_id: NetworkId::derive(network),
             enrollment_token: None,
@@ -4339,7 +4504,7 @@ mod tests {
                 NetworkId::derive(network),
                 subject.peer_id(),
                 vec!["control.access".to_string()],
-                vec![ProtocolId::new("/quicnet/control/1").expect("protocol")],
+                vec![ProtocolId::new("/quip/control/1").expect("protocol")],
                 membership::ResourceLimits::default(),
                 vec![],
                 100,
@@ -4352,7 +4517,7 @@ mod tests {
                 addresses: vec!["quic://198.51.100.77:8443".to_string()],
                 metadata: BTreeMap::from([(
                     "protocols".to_string(),
-                    "/quicnet/control/1".to_string(),
+                    "/quip/control/1".to_string(),
                 )]),
             }],
         };
@@ -4395,7 +4560,7 @@ mod tests {
             }],
             destinations: vec![relay::RelayDestination {
                 peer: bootstrap_peer.clone(),
-                protocols: vec![ProtocolId::new("/quicnet/control/1").expect("protocol")],
+                protocols: vec![ProtocolId::new("/quip/control/1").expect("protocol")],
             }],
         }));
         let control = LocalControlPlane::new(DaemonConfig::new(network, &state_path));
@@ -4406,7 +4571,7 @@ mod tests {
         let session = control
             .realize_best_path(
                 &bootstrap_peer,
-                &ProtocolId::new("/quicnet/control/1").expect("protocol"),
+                &ProtocolId::new("/quip/control/1").expect("protocol"),
                 TrafficClass::Control,
                 &transport,
             )
@@ -4423,7 +4588,7 @@ mod tests {
     #[tokio::test]
     async fn close_session_releases_runtime_registry_without_persisting_sessions() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-relay-close-state");
+        let state_path = unique_state_path("quip-relay-close-state");
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "relay-close-prod",
             &state_path,
@@ -4451,7 +4616,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_sessions_leaves_matching_direct_session_unchanged() {
-        let state_path = unique_state_path("quicnet-direct-reconcile-state");
+        let state_path = unique_state_path("quip-direct-reconcile-state");
         let (control, transport, session, bootstrap_peer) = establish_persisted_direct_session(
             "direct-reconcile-prod",
             &state_path,
@@ -4491,7 +4656,7 @@ mod tests {
     #[tokio::test]
     async fn upgrade_session_updates_runtime_path_and_releases_relay_registry() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-relay-upgrade-state");
+        let state_path = unique_state_path("quip-relay-upgrade-state");
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "relay-upgrade-prod",
             &state_path,
@@ -4543,7 +4708,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_sessions_upgrades_relay_session_to_direct() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-relay-reconcile-upgrade-state");
+        let state_path = unique_state_path("quip-relay-reconcile-upgrade-state");
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "relay-reconcile-upgrade-prod",
             &state_path,
@@ -4601,7 +4766,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_sessions_closes_policy_denied_session() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-relay-reconcile-close-state");
+        let state_path = unique_state_path("quip-relay-reconcile-close-state");
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "relay-reconcile-close-prod",
             &state_path,
@@ -4644,7 +4809,7 @@ mod tests {
     #[tokio::test]
     async fn authority_reevaluation_closes_denied_session_and_suppresses_reconnect() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-authority-reevaluation-close-state");
+        let state_path = unique_state_path("quip-authority-reevaluation-close-state");
         let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([94_u8; 32]);
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "authority-reevaluation-close-prod",
@@ -4813,7 +4978,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_paths_reports_active_and_suppressed_runtime_truth() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-runtime-paths-state");
+        let state_path = unique_state_path("quip-runtime-paths-state");
         let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([96_u8; 32]);
         let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
             "runtime-paths-prod",
@@ -4970,7 +5135,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_health_reports_listener_and_suppression_state() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-runtime-health-state");
+        let state_path = unique_state_path("quip-runtime-health-state");
         let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([98_u8; 32]);
         let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
             "runtime-health-prod",
@@ -5046,7 +5211,7 @@ mod tests {
     #[tokio::test]
     async fn authority_reevaluation_clears_runtime_suppression_and_restores_listener() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-authority-reevaluation-restore-state");
+        let state_path = unique_state_path("quip-authority-reevaluation-restore-state");
         let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([121_u8; 32]);
         let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
             "authority-reevaluation-restore-prod",
@@ -5134,7 +5299,7 @@ mod tests {
     #[tokio::test]
     async fn authority_reevaluation_closes_subject_mismatch_sessions() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-authority-reevaluation-subject-mismatch");
+        let state_path = unique_state_path("quip-authority-reevaluation-subject-mismatch");
         let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([111_u8; 32]);
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "authority-reevaluation-subject-mismatch-prod",
@@ -5174,7 +5339,7 @@ mod tests {
     #[tokio::test]
     async fn authority_reevaluation_closes_peer_membership_denied_sessions() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-authority-reevaluation-peer-membership");
+        let state_path = unique_state_path("quip-authority-reevaluation-peer-membership");
         let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([121_u8; 32]);
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "authority-reevaluation-peer-membership-prod",
@@ -5228,7 +5393,7 @@ mod tests {
     #[tokio::test]
     async fn authority_reevaluation_closes_sessions_after_local_membership_revocation() {
         let _guard = relay_test_lock();
-        let state_path = unique_state_path("quicnet-authority-reevaluation-local-membership");
+        let state_path = unique_state_path("quip-authority-reevaluation-local-membership");
         let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([141_u8; 32]);
         let (control, transport, _session, relay_peer) = establish_persisted_relay_session(
             "authority-reevaluation-local-membership-prod",
@@ -5293,7 +5458,7 @@ mod tests {
         let local = crypto::IdentityKeypair::from_secret_bytes([131_u8; 32]);
         let other = crypto::IdentityKeypair::from_secret_bytes([132_u8; 32]);
         let network = "authority-health-subject-mismatch";
-        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let protocol = ProtocolId::new("/quip/control/1").expect("protocol");
         let grant = membership::CapabilityGrant::issue(
             &authority,
             NetworkId::derive(network),
@@ -5306,7 +5471,7 @@ mod tests {
             300,
             1,
         );
-        let state_path = unique_state_path("quicnet-authority-health-subject-mismatch");
+        let state_path = unique_state_path("quip-authority-health-subject-mismatch");
         let control = LocalControlPlane::new(DaemonConfig::new(network, &state_path));
         let mut state = self_identity_daemon_state(network, vec![DaemonRole::Edge], &local);
         state.membership = MembershipCertificate::issue(
@@ -5334,7 +5499,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_sessions_ignores_stale_persisted_sessions_missing_from_runtime_transport() {
-        let state_path = unique_state_path("quicnet-direct-reconcile-missing-runtime-state");
+        let state_path = unique_state_path("quip-direct-reconcile-missing-runtime-state");
         let (control, _transport, session, _bootstrap_peer) = establish_persisted_direct_session(
             "direct-reconcile-missing-runtime-prod",
             &state_path,
@@ -5366,7 +5531,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_runtime_sessions_exposes_runtime_state_without_persisting_sessions() {
-        let state_path = unique_state_path("quicnet-sync-runtime-sessions-state");
+        let state_path = unique_state_path("quip-sync-runtime-sessions-state");
         let (control, transport, session, _bootstrap_peer) = establish_persisted_direct_session(
             "direct-sync-runtime-prod",
             &state_path,
@@ -5388,7 +5553,7 @@ mod tests {
 
     #[test]
     fn reprobe_network_change_promotes_udp_when_local_public_addr_exists() {
-        let state_path = unique_state_path("quicnet-reprobe-public-addr-state");
+        let state_path = unique_state_path("quip-reprobe-public-addr-state");
         let control = LocalControlPlane::new(DaemonConfig::new("reprobe-public-addr", &state_path));
         let mut state = fixture_daemon_state("reprobe-public-addr");
         state.netcheck.nat_type = NatType::UdpBlocked;
@@ -5424,7 +5589,7 @@ mod tests {
 
     #[test]
     fn reprobe_network_change_records_failed_observation_without_udp_evidence() {
-        let state_path = unique_state_path("quicnet-reprobe-failed-state");
+        let state_path = unique_state_path("quip-reprobe-failed-state");
         let control = LocalControlPlane::new(DaemonConfig::new("reprobe-failed", &state_path));
         let mut state = fixture_daemon_state("reprobe-failed");
         state.netcheck.nat_type = NatType::Unknown;

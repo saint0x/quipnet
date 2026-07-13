@@ -11,6 +11,7 @@
   "scenarios": [
     {
       "id": "clean-bootstrap",
+      "scenario_path": "tests/integration/scenarios/local-smoke.fozzy.json",
       "priority": 1,
       "description": "Node starts from valid durable identity and durable state and reaches healthy runtime status.",
       "checks": [
@@ -23,6 +24,7 @@
     },
     {
       "id": "restart-preserved-identity",
+      "scenario_path": "tests/integration/scenarios/restart-smoke.fozzy.json",
       "priority": 1,
       "description": "Restart preserves identity and durable state without falsely restoring runtime sessions.",
       "checks": [
@@ -35,6 +37,7 @@
     },
     {
       "id": "network-state-reset-preserved-identity",
+      "scenario_path": "tests/integration/scenarios/state-recovery-smoke.fozzy.json",
       "priority": 1,
       "description": "Network state reset preserves identity and requires honest re-bootstrap.",
       "checks": [
@@ -46,6 +49,7 @@
     },
     {
       "id": "authority-sync-membership-update",
+      "scenario_path": "tests/integration/scenarios/authority-reevaluation-smoke.fozzy.json",
       "priority": 1,
       "description": "Authority sync updates accepted facts and exposes resulting runtime impact.",
       "checks": [
@@ -58,6 +62,7 @@
     },
     {
       "id": "revocation-enforcement",
+      "scenario_path": "tests/integration/scenarios/authority-reevaluation-smoke.fozzy.json",
       "priority": 1,
       "description": "Revocation changes propagate into runtime behavior and reconnect policy.",
       "checks": [
@@ -70,6 +75,7 @@
     },
     {
       "id": "capability-change",
+      "scenario_path": "tests/integration/scenarios/authority-reevaluation-smoke.fozzy.json",
       "priority": 1,
       "description": "Capability changes reevaluate runtime behavior correctly.",
       "checks": [
@@ -81,6 +87,7 @@
     },
     {
       "id": "direct-path-success",
+      "scenario_path": "tests/integration/scenarios/local-smoke.fozzy.json",
       "priority": 2,
       "description": "Direct path establishment succeeds and is reported honestly.",
       "checks": [
@@ -92,6 +99,7 @@
     },
     {
       "id": "relay-fallback",
+      "scenario_path": "tests/integration/scenarios/relay-migration-smoke.fozzy.json",
       "priority": 2,
       "description": "Relay fallback is used when direct connectivity is unavailable and is visible to operators.",
       "checks": [
@@ -103,6 +111,7 @@
     },
     {
       "id": "path-migration",
+      "scenario_path": "tests/integration/scenarios/relay-migration-smoke.fozzy.json",
       "priority": 2,
       "description": "Session path migration is daemon-owned and observable.",
       "checks": [
@@ -114,6 +123,7 @@
     },
     {
       "id": "runtime-event-contract",
+      "scenario_path": "tests/integration/scenarios/reconnect-smoke.fozzy.json",
       "priority": 1,
       "description": "Runtime event fixtures, daemon responses, and emitted reconnect transitions stay aligned.",
       "checks": [
@@ -125,6 +135,7 @@
     },
     {
       "id": "runtime-diagnosis",
+      "scenario_path": "tests/integration/scenarios/runtime-diagnosis-smoke.fozzy.json",
       "priority": 1,
       "description": "Runtime diagnosis classifies durable, authority, and runtime failures while preserving terminal session visibility.",
       "checks": [
@@ -136,6 +147,7 @@
     },
     {
       "id": "reconnect-after-drop",
+      "scenario_path": "tests/integration/scenarios/reconnect-smoke.fozzy.json",
       "priority": 1,
       "description": "Reconnect after drop follows daemon-owned policy with deterministic retry behavior.",
       "checks": [
@@ -149,6 +161,7 @@
     },
     {
       "id": "durable-state-validation-failure",
+      "scenario_path": "tests/integration/scenarios/state-recovery-smoke.fozzy.json",
       "priority": 1,
       "description": "Invalid durable state fails validation clearly and safely.",
       "checks": [
@@ -160,6 +173,7 @@
     },
     {
       "id": "backup-and-restore",
+      "scenario_path": "tests/integration/scenarios/backup-restore-smoke.fozzy.json",
       "priority": 1,
       "description": "Backup and restore preserve the same logical node contract without confusing restore and rotation semantics.",
       "checks": [
@@ -171,6 +185,7 @@
     },
     {
       "id": "state-export-surface",
+      "scenario_path": "tests/integration/scenarios/backup-restore-smoke.fozzy.json",
       "priority": 1,
       "description": "Daemon-backed state export produces encrypted bundles and the offline restore path preserves the same logical node contract.",
       "checks": [
