@@ -355,11 +355,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Command::SessionStatus => {
             let sessions = control.session_snapshots()?;
             if sessions.is_empty() {
-                println!("no active sessions");
+                println!("no cached sessions");
             } else {
                 for session in sessions {
                     println!(
-                        "session_id={} transport_session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={}",
+                        "session_id={} transport_session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={} cached=true",
                         hex_session_id(&session.session_id),
                         hex_session_id(&session.transport_session_id),
                         session
@@ -383,7 +383,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         session.remote_endpoint,
                         session.relay_endpoint.unwrap_or_else(|| "none".to_string()),
                         session.datagrams_capable,
-                        session.migration_capable
+                        session.migration_capable,
                     );
                 }
             }
@@ -391,73 +391,26 @@ async fn run() -> Result<(), Box<dyn Error>> {
         Command::SessionClose { session } => {
             let sessions = control.session_snapshots()?;
             let session_id = resolve_session_id(session.as_deref(), &sessions)?;
-            let transport = QuicTransportAdapter::default();
-            control.close_session(&session_id, &transport).await?;
-            println!("closed session_id={}", hex_session_id(&session_id));
+            return Err(runtime_session_cli_error(format!(
+                "session-close requires a daemon-owned runtime session registry; cached session {} cannot be closed from a standalone quicnet process",
+                hex_session_id(&session_id)
+            ))
+            .into());
         }
         Command::SessionUpgrade { session } => {
-            let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
-            let _state = control.ensure_identity_bound_state(&identity)?;
             let sessions = control.session_snapshots()?;
             let session_id = resolve_session_id(session.as_deref(), &sessions)?;
-            let transport = QuicTransportAdapter::with_identity(
-                fabric::NetworkId::derive(&cli.network),
-                identity,
-            );
-            let session = control.upgrade_session(&session_id, &transport).await?;
-            println!(
-                "session_id={} transport_session_id={} relay_attempt_id={} peer={} protocol={} class={} path={:?} relay_peer={} remote_endpoint={} relay_endpoint={} datagrams={} migration={}",
-                hex_session_id(&session.session_id),
-                hex_session_id(&session.transport_session_id),
-                session
-                    .relay_attempt_id
-                    .as_ref()
-                    .map(hex_session_id)
-                    .unwrap_or_else(|| "none".to_string()),
-                session.peer,
-                session
-                    .protocol
-                    .as_ref()
-                    .map(ProtocolId::as_str)
-                    .unwrap_or("none"),
-                class_label(session.class),
-                session.path_kind,
-                session
-                    .relay_peer
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "direct".to_string()),
-                session.remote_endpoint,
-                session.relay_endpoint.unwrap_or_else(|| "none".to_string()),
-                session.datagrams_capable,
-                session.migration_capable
-            );
+            return Err(runtime_session_cli_error(format!(
+                "session-upgrade requires a daemon-owned runtime session registry; cached session {} cannot be upgraded from a standalone quicnet process",
+                hex_session_id(&session_id)
+            ))
+            .into());
         }
         Command::SessionReconcile => {
-            let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
-            let _state = control.ensure_identity_bound_state(&identity)?;
-            let transport = QuicTransportAdapter::with_identity(
-                fabric::NetworkId::derive(&cli.network),
-                identity,
-            );
-            let report = control.reconcile_sessions(&transport).await?;
-            println!(
-                "examined={} unchanged={} upgraded={} closed={}",
-                report.examined, report.unchanged, report.upgraded, report.closed
-            );
-            for entry in report.entries {
-                println!(
-                    "session_id={} peer={} disposition={} path={} reason={}",
-                    hex_session_id(&entry.session_id),
-                    entry.peer,
-                    reconcile_disposition_label(&entry.disposition),
-                    entry
-                        .path_kind
-                        .map(|path| format!("{path:?}"))
-                        .unwrap_or_else(|| "none".to_string()),
-                    entry.reason
-                );
-            }
+            return Err(runtime_session_cli_error(
+                "session-reconcile requires a daemon-owned runtime session registry and cannot run from a standalone quicnet process",
+            )
+            .into());
         }
         Command::RelayStatus => {
             let state = control.ensure_state()?;
@@ -556,14 +509,6 @@ fn render_path_alternatives(
         .collect()
 }
 
-fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition) -> &'static str {
-    match disposition {
-        fabric::SessionReconcileDisposition::Unchanged => "unchanged",
-        fabric::SessionReconcileDisposition::Upgraded => "upgraded",
-        fabric::SessionReconcileDisposition::Closed => "closed",
-    }
-}
-
 fn hex_session_id(session_id: &[u8; 16]) -> String {
     session_id
         .iter()
@@ -632,6 +577,10 @@ fn init_identity(
 }
 
 fn usage_error(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(message.into())
+}
+
+fn runtime_session_cli_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 
@@ -709,5 +658,14 @@ mod tests {
         let error = resolve_peer(None, &state).expect_err("missing peer should fail");
 
         assert!(error.to_string().contains("a peer is required"));
+    }
+
+    #[test]
+    fn runtime_session_cli_error_mentions_daemon_runtime() {
+        let error = runtime_session_cli_error(
+            "session-close requires a daemon-owned runtime session registry",
+        );
+
+        assert!(error.to_string().contains("daemon-owned runtime"));
     }
 }
