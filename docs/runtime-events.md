@@ -94,6 +94,9 @@ Useful details:
 - accepted revision summary
 - affected session count
 - policy action summary
+- authority subject mismatch status
+- local policy deny reason when reevaluation forces shutdown
+- per-session `action` and `cause` for policy-enforced closure or reconnect suppression
 
 ## Event Semantics
 

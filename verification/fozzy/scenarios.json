@@ -51,7 +51,8 @@
       "checks": [
         "authority_sync_visible",
         "accepted_facts_updated",
-        "runtime_reevaluation_triggered"
+        "runtime_reevaluation_triggered",
+        "authority_policy_enforcement_visible"
       ],
       "focus": ["authority", "membership", "reevaluation"]
     },
@@ -62,7 +63,8 @@
       "checks": [
         "revocation_detected",
         "policy_driven_session_action_visible",
-        "reconnect_suppression_visible"
+        "reconnect_suppression_visible",
+        "revocation_reason_visible"
       ],
       "focus": ["revocation", "policy", "runtime_enforcement"]
     },

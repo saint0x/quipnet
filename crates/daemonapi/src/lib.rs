@@ -121,6 +121,15 @@ pub struct DurableStateStatus {
 pub struct AuthoritySyncStatus {
     pub sync_status: String,
     pub last_accepted_revision: String,
+    pub health: String,
+    pub local_policy_denied: bool,
+    pub authority_subject_mismatch: bool,
+    pub reevaluated_sessions: usize,
+    pub closed_sessions: usize,
+    pub unchanged_sessions: usize,
+    pub reconnect_suppressions_added: usize,
+    pub reconnect_suppressions_cleared: usize,
+    pub local_policy_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -208,6 +217,7 @@ pub struct RuntimeEventEntry {
     pub event_id: String,
     pub event_type: String,
     pub emitted_at: String,
+    pub truth_kind: String,
     pub subject_kind: String,
     pub subject_id: String,
     pub details: Value,
@@ -218,6 +228,8 @@ pub struct RuntimeHealthResult {
     pub truth_kind: String,
     pub daemon_readiness: String,
     pub authority_sync_health: String,
+    pub authority_subject_status: String,
+    pub authority_deny_reason: Option<String>,
     pub runtime_registry_health: String,
     pub path_manager_health: String,
     pub reconnect_subsystem_health: String,

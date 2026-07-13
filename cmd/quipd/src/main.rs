@@ -310,7 +310,11 @@ async fn run_cycle(
             | CycleTrigger::AuthoritySnapshotChanged
             | CycleTrigger::StateChanged
     ) {
-        Some(control.reevaluate_runtime_authority(transport).await?)
+        Some(
+            control
+                .reevaluate_runtime_authority(local_identity, transport)
+                .await?,
+        )
     } else {
         None
     };
@@ -837,9 +841,10 @@ fn runtime_status_response(
         .and_then(|_| {
             let state = control.sync_runtime_sessions(transport)?;
             let health = control.runtime_health(transport)?;
-            Ok((state, health))
+            let authority = latest_authority_status(transport, &state, &health)?;
+            Ok((state, health, authority))
         }) {
-        Ok((state, health)) => ResponseEnvelope::success(
+        Ok((state, health, authority)) => ResponseEnvelope::success(
             envelope.request_id,
             RuntimeStatusResult {
                 truth_kind: "runtime".to_string(),
@@ -854,10 +859,7 @@ fn runtime_status_response(
                     path: args.state_path.clone(),
                     schema_version: state.schema_version,
                 },
-                authority: AuthoritySyncStatus {
-                    sync_status: "in_sync".to_string(),
-                    last_accepted_revision: authority_revision(&state),
-                },
+                authority,
                 runtime_summary: RuntimeSummary {
                     session_count: state.active_sessions().len(),
                     active_path_count: health.active_paths,
@@ -912,6 +914,7 @@ fn runtime_events_response(
                         event_id: event.event_id,
                         event_type: event.event_type,
                         emitted_at: event.emitted_at,
+                        truth_kind: event.truth_kind,
                         subject_kind: event.subject.kind,
                         subject_id: event.subject.id,
                         details: event.details,
@@ -970,6 +973,8 @@ fn runtime_health_response(
                 daemon_readiness: runtime_health_level_label(&health.daemon_readiness).to_string(),
                 authority_sync_health: runtime_health_level_label(&health.authority_sync_health)
                     .to_string(),
+                authority_subject_status: health.authority_subject_status,
+                authority_deny_reason: health.authority_deny_reason,
                 runtime_registry_health: runtime_health_level_label(
                     &health.runtime_registry_health,
                 )
@@ -1577,13 +1582,97 @@ fn reprobe_summary_line(report: &fabric::NetcheckReprobeReport) -> String {
 
 fn authority_reevaluation_summary_line(report: &fabric::AuthorityReevaluationReport) -> String {
     format!(
-        "reevaluated={} closed={} unchanged={} suppressed={} local_policy_denied={}",
+        "reevaluated={} closed={} unchanged={} suppressed_added={} suppressed_cleared={} local_policy_denied={} subject_mismatch={} local_membership_denied={} peer_membership_denied={} capability_denied={} reason={}",
         report.reevaluated_sessions,
         report.closed_sessions,
         report.unchanged_sessions,
         report.reconnect_suppressions_added,
-        report.local_policy_denied
+        report.reconnect_suppressions_cleared,
+        report.local_policy_denied,
+        report.authority_subject_mismatch,
+        report.local_membership_denied_sessions,
+        report.peer_membership_denied_sessions,
+        report.capability_denied_sessions,
+        report.local_policy_reason.as_deref().unwrap_or("none")
     )
+}
+
+fn latest_authority_status(
+    transport: &QuicTransportAdapter,
+    state: &fabric::DaemonState,
+    health: &fabric::RuntimeHealthReport,
+) -> Result<AuthoritySyncStatus, fabric::DaemonStateError> {
+    let latest = transport
+        .recent_events(64)?
+        .into_iter()
+        .rev()
+        .find(|event| event.event_type == "authority.reevaluation_completed");
+
+    let mut status = AuthoritySyncStatus {
+        sync_status: if health.authority_subject_status == "mismatched" {
+            "subject_mismatch".to_string()
+        } else if health.authority_deny_reason.is_some() {
+            "policy_enforced".to_string()
+        } else {
+            "in_sync".to_string()
+        },
+        last_accepted_revision: authority_revision(state),
+        health: runtime_health_level_label(&health.authority_sync_health).to_string(),
+        local_policy_denied: health.authority_deny_reason.is_some(),
+        authority_subject_mismatch: health.authority_subject_status == "mismatched",
+        reevaluated_sessions: 0,
+        closed_sessions: 0,
+        unchanged_sessions: 0,
+        reconnect_suppressions_added: 0,
+        reconnect_suppressions_cleared: 0,
+        local_policy_reason: health.authority_deny_reason.clone(),
+    };
+
+    if let Some(event) = latest {
+        status.local_policy_denied = event
+            .details
+            .get("local_policy_denied")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(status.local_policy_denied);
+        status.authority_subject_mismatch = event
+            .details
+            .get("authority_subject_mismatch")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(status.authority_subject_mismatch);
+        status.reevaluated_sessions = event
+            .details
+            .get("reevaluated_sessions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.closed_sessions = event
+            .details
+            .get("closed_sessions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.unchanged_sessions = event
+            .details
+            .get("unchanged_sessions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.reconnect_suppressions_added = event
+            .details
+            .get("reconnect_suppressions_added")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.reconnect_suppressions_cleared = event
+            .details
+            .get("reconnect_suppressions_cleared")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.local_policy_reason = event
+            .details
+            .get("local_policy_reason")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or(status.local_policy_reason);
+    }
+
+    Ok(status)
 }
 
 fn load_or_init_identity(

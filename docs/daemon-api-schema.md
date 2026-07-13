@@ -113,9 +113,24 @@ Purpose:
 Result should include:
 - daemon readiness
 - authority sync health
+- authority subject status
+- authority deny reason when live authority posture is suppressing behavior
 - runtime registry health
 - path manager health
 - reconnect subsystem health
+
+### `runtime.events.list`
+
+Purpose:
+- inspect bounded live runtime transition history
+
+Result should include per event:
+- event ID
+- event type
+- emitted time
+- event truth kind
+- subject reference
+- structured details
 
 ## Session Lifecycle Operations
 

@@ -3,6 +3,7 @@ target/
 .DS_Store
 *.log
 *.fozzy
+!verification/fozzy/authority-reevaluation.trace.fozzy
 !verification/fozzy/restart-smoke.trace.fozzy
 coverage/
 artifacts/

@@ -170,7 +170,14 @@ pub struct AuthorityReevaluationReport {
     pub closed_sessions: usize,
     pub unchanged_sessions: usize,
     pub reconnect_suppressions_added: usize,
+    pub reconnect_suppressions_cleared: usize,
     pub local_policy_denied: bool,
+    pub authority_subject_mismatch: bool,
+    pub subject_mismatch_sessions: usize,
+    pub local_membership_denied_sessions: usize,
+    pub peer_membership_denied_sessions: usize,
+    pub capability_denied_sessions: usize,
+    pub local_policy_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +232,8 @@ pub struct RuntimeHealthReport {
     pub runtime_registry_health: RuntimeHealthLevel,
     pub path_manager_health: RuntimeHealthLevel,
     pub reconnect_subsystem_health: RuntimeHealthLevel,
+    pub authority_subject_status: String,
+    pub authority_deny_reason: Option<String>,
     pub active_sessions: usize,
     pub active_paths: usize,
     pub active_listeners: usize,
@@ -1485,8 +1494,12 @@ impl LocalControlPlane {
             .into_iter()
             .filter(|path| path.session_id.is_some())
             .count();
-        let authority_sync_health = if state.deny_reason(&state.local_peer_id).is_some() {
-            RuntimeHealthLevel::Degraded
+        let authority_subject_mismatch = state.membership.subject_peer_id != state.local_peer_id;
+        let authority_deny_reason = state.deny_reason(&state.local_peer_id).map(str::to_string);
+        let authority_sync_health = if authority_subject_mismatch {
+            RuntimeHealthLevel::Failed
+        } else if authority_deny_reason.is_some() {
+            RuntimeHealthLevel::Suppressed
         } else {
             RuntimeHealthLevel::Ready
         };
@@ -1518,6 +1531,12 @@ impl LocalControlPlane {
             runtime_registry_health,
             path_manager_health,
             reconnect_subsystem_health,
+            authority_subject_status: if authority_subject_mismatch {
+                "mismatched".to_string()
+            } else {
+                "matched".to_string()
+            },
+            authority_deny_reason,
             active_sessions: transport_health.active_sessions,
             active_paths,
             active_listeners: transport_health.active_listeners,
@@ -1531,28 +1550,48 @@ impl LocalControlPlane {
 
     pub async fn reevaluate_runtime_authority<T>(
         &self,
+        runtime_identity: &IdentityKeypair,
         transport: &T,
     ) -> Result<AuthorityReevaluationReport, DaemonStateError>
     where
         T: SessionLifecycleTransport,
     {
         let state = self.ensure_state()?;
+        let runtime_peer_id = runtime_identity.peer_id();
+        let authority_subject_mismatch = state.membership.subject_peer_id != runtime_peer_id;
+        let local_policy_reason = if authority_subject_mismatch {
+            Some(format!(
+                "authority subject {} does not match runtime identity {}",
+                state.membership.subject_peer_id, runtime_peer_id
+            ))
+        } else {
+            state.deny_reason(&state.local_peer_id).map(str::to_string)
+        };
         transport.record_runtime_event(
             "authority.reevaluation_started",
             RuntimeEventSubject {
                 kind: "authority".to_string(),
-                id: state.local_peer_id.to_string(),
+                id: runtime_peer_id.to_string(),
             },
             json!({
-                "active_sessions": transport.active_sessions()?.len()
+                "active_sessions": transport.active_sessions()?.len(),
+                "authority_subject_peer_id": state.membership.subject_peer_id.to_string(),
+                "runtime_peer_id": runtime_peer_id.to_string(),
+                "authority_subject_mismatch": authority_subject_mismatch,
+                "local_policy_reason": local_policy_reason.clone()
             }),
         )?;
         let sessions = transport.active_sessions()?;
-        let local_policy_denied = state.deny_reason(&state.local_peer_id).is_some();
+        let local_policy_denied = local_policy_reason.is_some();
         let mut reevaluated_sessions = 0;
         let mut closed_sessions = 0;
         let mut unchanged_sessions = 0;
         let mut reconnect_suppressions_added = 0;
+        let mut reconnect_suppressions_cleared = 0;
+        let mut subject_mismatch_sessions = 0;
+        let mut local_membership_denied_sessions = 0;
+        let mut peer_membership_denied_sessions = 0;
+        let mut capability_denied_sessions = 0;
 
         for session in sessions {
             let Some(protocol) = session.protocol.clone() else {
@@ -1560,36 +1599,85 @@ impl LocalControlPlane {
             };
             reevaluated_sessions += 1;
             let policy = state.explain_policy(&session.peer, &protocol);
-            if local_policy_denied || !policy.allowed {
-                let reason = if local_policy_denied {
-                    state
-                        .deny_reason(&state.local_peer_id)
-                        .unwrap_or("local membership denied")
-                        .to_string()
-                } else {
-                    policy.reason.clone()
-                };
+            let enforced = if let Some(reason) = local_policy_reason.clone() {
+                Some(classify_authority_policy_enforcement(
+                    AuthorityPolicyCause::if_subject_mismatch(
+                        authority_subject_mismatch,
+                        &session.peer,
+                        &policy.reason,
+                    )
+                    .unwrap_or(AuthorityPolicyCause::LocalMembershipDenied),
+                    reason,
+                ))
+            } else if !policy.allowed {
+                Some(classify_authority_policy_enforcement(
+                    classify_remote_policy_cause(&state, &session.peer, &policy.reason),
+                    policy.reason.clone(),
+                ))
+            } else {
+                None
+            };
+            if let Some(enforced) = enforced {
                 transport.suppress_reconnect(
                     &session.peer,
                     Some(&protocol),
                     session.class,
-                    reason.clone(),
+                    enforced.reason.clone(),
                 )?;
                 reconnect_suppressions_added += 1;
+                match enforced.cause {
+                    AuthorityPolicyCause::SubjectMismatch => {
+                        subject_mismatch_sessions += 1;
+                    }
+                    AuthorityPolicyCause::LocalMembershipDenied => {
+                        local_membership_denied_sessions += 1;
+                    }
+                    AuthorityPolicyCause::PeerMembershipDenied => {
+                        peer_membership_denied_sessions += 1;
+                    }
+                    AuthorityPolicyCause::CapabilityDenied => {
+                        capability_denied_sessions += 1;
+                    }
+                }
                 let _ = transport.update_session_state(
                     &session.session_id,
                     RuntimeSessionState::Closing,
                     Some(SessionClosureReason::PolicyRejected),
-                    Some(reason),
+                    Some(enforced.reason.clone()),
+                )?;
+                transport.record_runtime_event(
+                    "authority.policy_enforced",
+                    RuntimeEventSubject {
+                        kind: "session".to_string(),
+                        id: hex_session_id(&session.session_id),
+                    },
+                    json!({
+                        "peer_id": session.peer.to_string(),
+                        "protocol": protocol.as_str(),
+                        "class": format!("{:?}", session.class),
+                        "action": "close_and_suppress_reconnect",
+                        "cause": enforced.cause.label(),
+                        "reason": enforced.reason,
+                        "local_policy_denied": local_policy_denied,
+                        "authority_subject_mismatch": authority_subject_mismatch
+                    }),
                 )?;
                 transport.close_session(&session).await?;
                 closed_sessions += 1;
             } else {
+                let suppression_present = transport.reconnect_suppressions()?.iter().any(|entry| {
+                    entry.peer == session.peer
+                        && entry.protocol.as_ref() == Some(&protocol)
+                        && entry.class == session.class
+                });
                 transport.clear_reconnect_suppression(
                     &session.peer,
                     Some(&protocol),
                     session.class,
                 )?;
+                if suppression_present {
+                    reconnect_suppressions_cleared += 1;
+                }
                 unchanged_sessions += 1;
             }
         }
@@ -1599,20 +1687,34 @@ impl LocalControlPlane {
             closed_sessions,
             unchanged_sessions,
             reconnect_suppressions_added,
+            reconnect_suppressions_cleared,
             local_policy_denied,
+            authority_subject_mismatch,
+            subject_mismatch_sessions,
+            local_membership_denied_sessions,
+            peer_membership_denied_sessions,
+            capability_denied_sessions,
+            local_policy_reason: local_policy_reason.clone(),
         };
         transport.record_runtime_event(
             "authority.reevaluation_completed",
             RuntimeEventSubject {
                 kind: "authority".to_string(),
-                id: state.local_peer_id.to_string(),
+                id: runtime_peer_id.to_string(),
             },
             json!({
                 "reevaluated_sessions": report.reevaluated_sessions,
                 "closed_sessions": report.closed_sessions,
                 "unchanged_sessions": report.unchanged_sessions,
                 "reconnect_suppressions_added": report.reconnect_suppressions_added,
-                "local_policy_denied": report.local_policy_denied
+                "reconnect_suppressions_cleared": report.reconnect_suppressions_cleared,
+                "local_policy_denied": report.local_policy_denied,
+                "authority_subject_mismatch": report.authority_subject_mismatch,
+                "subject_mismatch_sessions": report.subject_mismatch_sessions,
+                "local_membership_denied_sessions": report.local_membership_denied_sessions,
+                "peer_membership_denied_sessions": report.peer_membership_denied_sessions,
+                "capability_denied_sessions": report.capability_denied_sessions,
+                "local_policy_reason": report.local_policy_reason
             }),
         )?;
         Ok(report)
@@ -1667,6 +1769,59 @@ fn hex_session_id(session_id: &[u8; 16]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthorityPolicyCause {
+    SubjectMismatch,
+    LocalMembershipDenied,
+    PeerMembershipDenied,
+    CapabilityDenied,
+}
+
+impl AuthorityPolicyCause {
+    fn if_subject_mismatch(mismatch: bool, _peer: &PeerId, _policy_reason: &str) -> Option<Self> {
+        if mismatch {
+            Some(Self::SubjectMismatch)
+        } else {
+            None
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::SubjectMismatch => "subject_mismatch",
+            Self::LocalMembershipDenied => "local_membership_denied",
+            Self::PeerMembershipDenied => "peer_membership_denied",
+            Self::CapabilityDenied => "capability_denied",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthorityPolicyEnforcement {
+    cause: AuthorityPolicyCause,
+    reason: String,
+}
+
+fn classify_authority_policy_enforcement(
+    cause: AuthorityPolicyCause,
+    reason: String,
+) -> AuthorityPolicyEnforcement {
+    AuthorityPolicyEnforcement { cause, reason }
+}
+
+fn classify_remote_policy_cause(
+    state: &DaemonState,
+    peer: &PeerId,
+    reason: &str,
+) -> AuthorityPolicyCause {
+    if state.deny_reason(peer).is_some() || reason.contains("revoked") || reason.contains("denied")
+    {
+        AuthorityPolicyCause::PeerMembershipDenied
+    } else {
+        AuthorityPolicyCause::CapabilityDenied
+    }
 }
 
 fn session_matches_route(session: &SessionSnapshot, route: &RoutePlan) -> bool {
@@ -3523,6 +3678,7 @@ mod tests {
     async fn authority_reevaluation_closes_denied_session_and_suppresses_reconnect() {
         let _guard = relay_test_lock();
         let state_path = unique_state_path("quicnet-authority-reevaluation-close-state");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([94_u8; 32]);
         let (control, transport, session, relay_peer) = establish_persisted_relay_session(
             "authority-reevaluation-close-prod",
             &state_path,
@@ -3540,13 +3696,14 @@ mod tests {
             .expect("updated state should persist");
 
         let report = control
-            .reevaluate_runtime_authority(&transport)
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
             .await
             .expect("authority reevaluation should succeed");
 
         assert_eq!(report.reevaluated_sessions, 1);
         assert_eq!(report.closed_sessions, 1);
         assert_eq!(report.reconnect_suppressions_added, 1);
+        assert_eq!(report.capability_denied_sessions, 1);
         assert!(transport
             .session_snapshot(&session.session_id)
             .expect("runtime lookup should succeed")
@@ -3557,6 +3714,12 @@ mod tests {
         assert_eq!(suppressions.len(), 1);
         assert_eq!(suppressions[0].peer, session.peer);
         assert_eq!(registered_session_count(&relay_peer), Some(0));
+        let events = transport.recent_events(16).expect("events should load");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "authority.policy_enforced"
+                && event.details.get("cause").and_then(|value| value.as_str())
+                    == Some("capability_denied")));
 
         let denied = control
             .realize_best_path(
@@ -3577,6 +3740,7 @@ mod tests {
     async fn runtime_paths_reports_active_and_suppressed_runtime_truth() {
         let _guard = relay_test_lock();
         let state_path = unique_state_path("quicnet-runtime-paths-state");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([96_u8; 32]);
         let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
             "runtime-paths-prod",
             &state_path,
@@ -3602,7 +3766,7 @@ mod tests {
             .save(&state_path)
             .expect("updated state should persist");
         control
-            .reevaluate_runtime_authority(&transport)
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
             .await
             .expect("authority reevaluation should succeed");
 
@@ -3627,6 +3791,7 @@ mod tests {
     async fn runtime_health_reports_listener_and_suppression_state() {
         let _guard = relay_test_lock();
         let state_path = unique_state_path("quicnet-runtime-health-state");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([98_u8; 32]);
         let (control, transport, session, _relay_peer) = establish_persisted_relay_session(
             "runtime-health-prod",
             &state_path,
@@ -3659,7 +3824,7 @@ mod tests {
             .save(&state_path)
             .expect("updated state should persist");
         control
-            .reevaluate_runtime_authority(&transport)
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
             .await
             .expect("authority reevaluation should succeed");
 
@@ -3676,9 +3841,212 @@ mod tests {
             RuntimeReconnectState::Suppressed
         );
         assert_eq!(suppressed.reconnect_suppression_count, 1);
+        assert_eq!(suppressed.authority_subject_status, "matched");
+        assert!(suppressed.authority_deny_reason.is_none());
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();
+    }
+
+    #[tokio::test]
+    async fn authority_reevaluation_closes_subject_mismatch_sessions() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-authority-reevaluation-subject-mismatch");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([111_u8; 32]);
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "authority-reevaluation-subject-mismatch-prod",
+            &state_path,
+            109,
+            110,
+            b"authority-reevaluation-subject-mismatch-runtime",
+            b"authority-reevaluation-subject-mismatch-target",
+        )
+        .await;
+
+        let report = control
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
+            .await
+            .expect("authority reevaluation should succeed");
+
+        assert!(report.authority_subject_mismatch);
+        assert_eq!(report.subject_mismatch_sessions, 1);
+        assert_eq!(report.closed_sessions, 1);
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+        assert!(transport
+            .session_snapshot(&session.session_id)
+            .expect("runtime lookup should succeed")
+            .is_none());
+
+        let events = transport.recent_events(16).expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "authority.policy_enforced"
+                && event.details.get("cause").and_then(|value| value.as_str())
+                    == Some("subject_mismatch")
+        }));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn authority_reevaluation_closes_peer_membership_denied_sessions() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-authority-reevaluation-peer-membership");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([121_u8; 32]);
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "authority-reevaluation-peer-membership-prod",
+            &state_path,
+            120,
+            121,
+            b"authority-reevaluation-peer-membership-runtime",
+            b"authority-reevaluation-peer-membership-target",
+        )
+        .await;
+        let authority = crypto::IdentityKeypair::from_secret_bytes([120_u8; 32]);
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated
+            .revocations
+            .push(membership::RevocationRecord::issue(
+                &authority,
+                NetworkId::derive("authority-reevaluation-peer-membership-prod"),
+                membership::RevocationTarget::Peer {
+                    peer_id: session.peer.clone(),
+                },
+                membership::RevocationReason::Administrative,
+                150,
+                150,
+                9,
+                Some("peer membership revoked".to_string()),
+            ));
+        updated.denied_peers = denied_peers(&updated.membership, &updated.revocations);
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let report = control
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
+            .await
+            .expect("authority reevaluation should succeed");
+
+        assert_eq!(report.peer_membership_denied_sessions, 1);
+        assert_eq!(report.closed_sessions, 1);
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+        let events = transport.recent_events(16).expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "authority.policy_enforced"
+                && event.details.get("cause").and_then(|value| value.as_str())
+                    == Some("peer_membership_denied")
+        }));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn authority_reevaluation_closes_sessions_after_local_membership_revocation() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-authority-reevaluation-local-membership");
+        let runtime_identity = crypto::IdentityKeypair::from_secret_bytes([141_u8; 32]);
+        let (control, transport, _session, relay_peer) = establish_persisted_relay_session(
+            "authority-reevaluation-local-membership-prod",
+            &state_path,
+            140,
+            141,
+            b"authority-reevaluation-local-membership-runtime",
+            b"authority-reevaluation-local-membership-target",
+        )
+        .await;
+        let authority = crypto::IdentityKeypair::from_secret_bytes([140_u8; 32]);
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        let membership = updated.membership.clone();
+        updated
+            .revocations
+            .push(membership::RevocationRecord::issue(
+                &authority,
+                NetworkId::derive("authority-reevaluation-local-membership-prod"),
+                membership::RevocationTarget::MembershipCertificate {
+                    subject_peer_id: membership.subject_peer_id.clone(),
+                    issued_at: membership.issued_at,
+                },
+                membership::RevocationReason::Administrative,
+                150,
+                150,
+                11,
+                Some("local membership revoked".to_string()),
+            ));
+        updated.denied_peers = denied_peers(&updated.membership, &updated.revocations);
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let report = control
+            .reevaluate_runtime_authority(&runtime_identity, &transport)
+            .await
+            .expect("authority reevaluation should succeed");
+
+        assert!(report.local_policy_denied);
+        assert_eq!(report.local_membership_denied_sessions, 1);
+        assert_eq!(report.closed_sessions, 1);
+        assert!(report
+            .local_policy_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("membership revoked")));
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let events = transport.recent_events(16).expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "authority.policy_enforced"
+                && event.details.get("cause").and_then(|value| value.as_str())
+                    == Some("local_membership_denied")
+        }));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn runtime_health_reports_failed_authority_subject_status_when_state_is_incoherent() {
+        let authority = crypto::IdentityKeypair::from_secret_bytes([130_u8; 32]);
+        let local = crypto::IdentityKeypair::from_secret_bytes([131_u8; 32]);
+        let other = crypto::IdentityKeypair::from_secret_bytes([132_u8; 32]);
+        let network = "authority-health-subject-mismatch";
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let grant = membership::CapabilityGrant::issue(
+            &authority,
+            NetworkId::derive(network),
+            local.peer_id(),
+            vec!["control.access".to_string()],
+            vec![protocol],
+            membership::ResourceLimits::default(),
+            Vec::new(),
+            100,
+            300,
+            1,
+        );
+        let state_path = unique_state_path("quicnet-authority-health-subject-mismatch");
+        let control = LocalControlPlane::new(DaemonConfig::new(network, &state_path));
+        let mut state = self_identity_daemon_state(network, vec![DaemonRole::Edge], &local);
+        state.membership = MembershipCertificate::issue(
+            &authority,
+            NetworkId::derive(network),
+            other.peer_id(),
+            100,
+            300,
+            vec!["member".to_string()],
+        );
+        state.capability_grants = vec![grant];
+        state.save(&state_path).expect("state should persist");
+
+        let health = control
+            .runtime_health(&QuicTransportAdapter::with_identity(
+                NetworkId::derive(network),
+                local.clone(),
+            ))
+            .expect("runtime health should render");
+
+        assert_eq!(health.authority_sync_health, RuntimeHealthLevel::Failed);
+        assert_eq!(health.authority_subject_status, "mismatched");
+        let _ = std::fs::remove_file(state_path);
     }
 
     #[tokio::test]

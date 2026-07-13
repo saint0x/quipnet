@@ -246,13 +246,22 @@ async fn run() -> Result<(), Box<dyn Error>> {
             match daemon_request::<RuntimeStatusResult>(&cli, "runtime.status", json!({})) {
                 Ok(status) => {
                     println!(
-                        "daemon_health={} identity_status={} identity_peer={} durable_state_status={} schema_version={} authority_sync={} authority_revision={} runtime_sessions={} active_paths={} reconnect_state={} truth_kind={}",
+                        "daemon_health={} identity_status={} identity_peer={} durable_state_status={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} runtime_sessions={} active_paths={} reconnect_state={} truth_kind={}",
                         status.daemon_health,
                         status.identity.status,
                         status.identity.node_id,
                         status.durable_state.status,
                         status.durable_state.schema_version,
                         status.authority.sync_status,
+                        status.authority.health,
+                        status.authority.authority_subject_mismatch,
+                        status.authority.local_policy_denied,
+                        status.authority.local_policy_reason.as_deref().unwrap_or("none"),
+                        status.authority.reevaluated_sessions,
+                        status.authority.closed_sessions,
+                        status.authority.unchanged_sessions,
+                        status.authority.reconnect_suppressions_added,
+                        status.authority.reconnect_suppressions_cleared,
                         status.authority.last_accepted_revision,
                         status.runtime_summary.session_count,
                         status.runtime_summary.active_path_count,
@@ -381,10 +390,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     for event in events.events {
                         println!(
-                            "event_id={} event_type={} emitted_at={} subject_kind={} subject_id={} details={} truth_kind={}",
+                            "event_id={} event_type={} emitted_at={} event_truth_kind={} subject_kind={} subject_id={} details={} truth_kind={}",
                             event.event_id,
                             event.event_type,
                             event.emitted_at,
+                            event.truth_kind,
                             event.subject_kind,
                             event.subject_id,
                             serde_json::to_string(&event.details)?,
@@ -912,9 +922,11 @@ fn emit_runtime_listeners(listeners: &RuntimeListenersListResult) {
 
 fn emit_runtime_health(health: &RuntimeHealthResult) {
     println!(
-        "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_attempts={} reconnect_next_attempt_unix_secs={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
+        "daemon_readiness={} authority_sync_health={} authority_subject_status={} authority_deny_reason={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_attempts={} reconnect_next_attempt_unix_secs={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
         health.daemon_readiness,
         health.authority_sync_health,
+        health.authority_subject_status,
+        health.authority_deny_reason.as_deref().unwrap_or("none"),
         health.runtime_registry_health,
         health.path_manager_health,
         health.reconnect_subsystem_health,
@@ -1478,6 +1490,8 @@ mod tests {
             truth_kind: "runtime".to_string(),
             daemon_readiness: "suppressed".to_string(),
             authority_sync_health: "ready".to_string(),
+            authority_subject_status: "matched".to_string(),
+            authority_deny_reason: Some("membership revoked".to_string()),
             runtime_registry_health: "ready".to_string(),
             path_manager_health: "ready".to_string(),
             reconnect_subsystem_health: "suppressed".to_string(),
@@ -1492,9 +1506,11 @@ mod tests {
         };
 
         let rendered = format!(
-            "daemon_readiness={} authority_sync_health={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_attempts={} reconnect_next_attempt_unix_secs={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
+            "daemon_readiness={} authority_sync_health={} authority_subject_status={} authority_deny_reason={} runtime_registry_health={} path_manager_health={} reconnect_subsystem_health={} active_sessions={} active_paths={} active_listeners={} reconnect_state={} reconnect_attempts={} reconnect_next_attempt_unix_secs={} reconnect_suppressions={} runtime_event_buffer_depth={} truth_kind={}",
             health.daemon_readiness,
             health.authority_sync_health,
+            health.authority_subject_status,
+            health.authority_deny_reason.as_deref().unwrap_or("none"),
             health.runtime_registry_health,
             health.path_manager_health,
             health.reconnect_subsystem_health,
