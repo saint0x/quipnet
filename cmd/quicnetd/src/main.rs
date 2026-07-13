@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use crypto::IdentityKeypair;
@@ -45,6 +46,12 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     reconcile_interval_seconds: u64,
 
+    #[arg(long, default_value_t = 1000)]
+    change_watch_interval_ms: u64,
+
+    #[arg(long)]
+    network_change_trigger_path: Option<String>,
+
     #[arg(long, default_value_t = false)]
     one_shot: bool,
 
@@ -60,10 +67,37 @@ struct Args {
 
 #[derive(Debug)]
 struct DaemonCycleReport {
+    trigger: CycleTrigger,
     state: fabric::DaemonState,
     reconcile_report: Option<fabric::SessionReconcileReport>,
     active_session: Option<SessionSnapshot>,
     connect_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CycleTrigger {
+    Startup,
+    IntervalElapsed,
+    StateChanged,
+    AuthoritySnapshotChanged,
+    NetworkChangeRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    exists: bool,
+    len: Option<u64>,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Debug)]
+struct DaemonTriggerMonitor {
+    state_path: PathBuf,
+    authority_snapshot_path: Option<PathBuf>,
+    network_change_trigger_path: Option<PathBuf>,
+    state_fingerprint: FileFingerprint,
+    authority_snapshot_fingerprint: Option<FileFingerprint>,
+    network_change_trigger_fingerprint: Option<FileFingerprint>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -76,9 +110,11 @@ async fn main() {
     ));
 
     initialize_state(&args, &control).expect("daemon state should persist");
+    let mut trigger_monitor = DaemonTriggerMonitor::new(&args);
+    let mut trigger = CycleTrigger::Startup;
 
     loop {
-        let report = match run_cycle(&args, &control).await {
+        let report = match run_cycle(&args, &control, trigger.clone()).await {
             Ok(report) => report,
             Err(error) => {
                 eprintln!("quicnetd cycle failed: {error}");
@@ -91,19 +127,25 @@ async fn main() {
             break;
         }
 
-        let sleep_duration = Duration::from_secs(args.reconcile_interval_seconds.max(1));
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                if let Err(error) = result {
-                    eprintln!("quicnetd signal handling failed: {error}");
-                    std::process::exit(1);
-                }
+        trigger_monitor.refresh_baseline();
+        match wait_for_next_cycle(&args, &mut trigger_monitor).await {
+            Ok(next_trigger) => trigger = next_trigger,
+            Err(WaitOutcome::Interrupted) => {
                 println!("quicnetd stopping: received interrupt");
                 break;
             }
-            _ = tokio::time::sleep(sleep_duration) => {}
+            Err(WaitOutcome::SignalError(error)) => {
+                eprintln!("quicnetd signal handling failed: {error}");
+                std::process::exit(1);
+            }
         }
     }
+}
+
+#[derive(Debug)]
+enum WaitOutcome {
+    Interrupted,
+    SignalError(std::io::Error),
 }
 
 fn initialize_state(
@@ -185,6 +227,7 @@ fn refresh_state(
 async fn run_cycle(
     args: &Args,
     control: &LocalControlPlane,
+    trigger: CycleTrigger,
 ) -> Result<DaemonCycleReport, fabric::DaemonStateError> {
     let mut state = refresh_state(args, control)?;
     let reconcile_report = if args.disable_reconcile {
@@ -228,6 +271,7 @@ async fn run_cycle(
     };
 
     Ok(DaemonCycleReport {
+        trigger,
         state,
         reconcile_report,
         active_session,
@@ -319,7 +363,7 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
         .map(|decision| decision.explanation.summary)
         .unwrap_or_else(|| "no routing candidates".to_string());
     println!(
-        "quicnetd active: {} selected_path={} active_session={} reconcile={} connect={} state_path={}",
+        "quicnetd active: {} selected_path={} active_session={} reconcile={} connect={} trigger={} state_path={}",
         report.state.status_line(),
         selected_path,
         report
@@ -333,6 +377,7 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
             .map(reconcile_summary_line)
             .unwrap_or_else(|| "disabled".to_string()),
         report.connect_status,
+        cycle_trigger_label(&report.trigger),
         args.state_path
     );
 }
@@ -351,11 +396,51 @@ fn daemon_transport(args: &Args) -> QuicTransportAdapter {
     QuicTransportAdapter::with_identity(fabric::NetworkId::derive(&args.network), identity)
 }
 
+async fn wait_for_next_cycle(
+    args: &Args,
+    trigger_monitor: &mut DaemonTriggerMonitor,
+) -> Result<CycleTrigger, WaitOutcome> {
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(args.reconcile_interval_seconds.max(1));
+    let poll_interval = Duration::from_millis(args.change_watch_interval_ms.max(1));
+
+    loop {
+        if let Some(trigger) = trigger_monitor.detect_trigger() {
+            return Ok(trigger);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(CycleTrigger::IntervalElapsed);
+        }
+        let remaining = deadline.duration_since(now);
+        let sleep_duration = remaining.min(poll_interval);
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                match result {
+                    Ok(()) => return Err(WaitOutcome::Interrupted),
+                    Err(error) => return Err(WaitOutcome::SignalError(error)),
+                }
+            }
+            _ = tokio::time::sleep(sleep_duration) => {}
+        }
+    }
+}
+
 fn hex_session_id(session_id: &[u8; 16]) -> String {
     session_id
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+fn cycle_trigger_label(trigger: &CycleTrigger) -> &'static str {
+    match trigger {
+        CycleTrigger::Startup => "startup",
+        CycleTrigger::IntervalElapsed => "interval",
+        CycleTrigger::StateChanged => "state-changed",
+        CycleTrigger::AuthoritySnapshotChanged => "authority-snapshot-changed",
+        CycleTrigger::NetworkChangeRequested => "network-change",
+    }
 }
 
 fn reconcile_summary_line(report: &fabric::SessionReconcileReport) -> String {
@@ -384,10 +469,156 @@ fn load_or_init_identity(identity_path: &str, passphrase_env: &str) -> IdentityK
     }
 }
 
+impl DaemonTriggerMonitor {
+    fn new(args: &Args) -> Self {
+        let state_path = PathBuf::from(&args.state_path);
+        let authority_snapshot_path = args.authority_snapshot.as_ref().map(PathBuf::from);
+        let network_change_trigger_path =
+            args.network_change_trigger_path.as_ref().map(PathBuf::from);
+        Self {
+            state_fingerprint: file_fingerprint(&state_path),
+            authority_snapshot_fingerprint: authority_snapshot_path
+                .as_ref()
+                .map(|path| file_fingerprint(path)),
+            network_change_trigger_fingerprint: network_change_trigger_path
+                .as_ref()
+                .map(|path| file_fingerprint(path)),
+            state_path,
+            authority_snapshot_path,
+            network_change_trigger_path,
+        }
+    }
+
+    fn refresh_baseline(&mut self) {
+        self.state_fingerprint = file_fingerprint(&self.state_path);
+        self.authority_snapshot_fingerprint = self
+            .authority_snapshot_path
+            .as_ref()
+            .map(|path| file_fingerprint(path));
+        self.network_change_trigger_fingerprint = self
+            .network_change_trigger_path
+            .as_ref()
+            .map(|path| file_fingerprint(path));
+    }
+
+    fn detect_trigger(&mut self) -> Option<CycleTrigger> {
+        if let Some(path) = &self.network_change_trigger_path {
+            let current = file_fingerprint(path);
+            if self.network_change_trigger_fingerprint.as_ref() != Some(&current) {
+                self.network_change_trigger_fingerprint = Some(current);
+                return Some(CycleTrigger::NetworkChangeRequested);
+            }
+        }
+
+        let current_state = file_fingerprint(&self.state_path);
+        if self.state_fingerprint != current_state {
+            self.state_fingerprint = current_state;
+            return Some(CycleTrigger::StateChanged);
+        }
+
+        if let Some(path) = &self.authority_snapshot_path {
+            let current = file_fingerprint(path);
+            if self.authority_snapshot_fingerprint.as_ref() != Some(&current) {
+                self.authority_snapshot_fingerprint = Some(current);
+                return Some(CycleTrigger::AuthoritySnapshotChanged);
+            }
+        }
+
+        None
+    }
+}
+
+fn file_fingerprint(path: &Path) -> FileFingerprint {
+    match std::fs::metadata(path) {
+        Ok(metadata) => FileFingerprint {
+            exists: true,
+            len: Some(metadata.len()),
+            modified: metadata.modified().ok(),
+        },
+        Err(_) => FileFingerprint {
+            exists: false,
+            len: None,
+            modified: None,
+        },
+    }
+}
+
 fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition) -> &'static str {
     match disposition {
         fabric::SessionReconcileDisposition::Unchanged => "unchanged",
         fabric::SessionReconcileDisposition::Upgraded => "upgraded",
         fabric::SessionReconcileDisposition::Closed => "closed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_monitor_detects_state_change() {
+        let temp = unique_temp_path("quicnetd-trigger-state");
+        std::fs::write(&temp, "v1").expect("state file should write");
+        let args = test_args(temp.to_string_lossy().as_ref());
+        let mut monitor = DaemonTriggerMonitor::new(&args);
+        monitor.refresh_baseline();
+
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(&temp, "v2").expect("state file should update");
+
+        assert_eq!(monitor.detect_trigger(), Some(CycleTrigger::StateChanged));
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn trigger_monitor_detects_network_change_file_touch() {
+        let state_path = unique_temp_path("quicnetd-trigger-state");
+        let trigger_path = unique_temp_path("quicnetd-network-change");
+        std::fs::write(&state_path, "state").expect("state file should write");
+        let mut args = test_args(state_path.to_string_lossy().as_ref());
+        args.network_change_trigger_path = Some(trigger_path.to_string_lossy().into_owned());
+        let mut monitor = DaemonTriggerMonitor::new(&args);
+        monitor.refresh_baseline();
+
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(&trigger_path, "poke").expect("trigger file should write");
+
+        assert_eq!(
+            monitor.detect_trigger(),
+            Some(CycleTrigger::NetworkChangeRequested)
+        );
+        let _ = std::fs::remove_file(state_path);
+        let _ = std::fs::remove_file(trigger_path);
+    }
+
+    fn test_args(state_path: &str) -> Args {
+        Args {
+            network: "test-network".to_string(),
+            state_path: state_path.to_string(),
+            identity_path: "./var/test-identity.json".to_string(),
+            identity_passphrase_env: "QUICNET_TEST_IDENTITY".to_string(),
+            authority_snapshot: None,
+            authority_origin: None,
+            authority_subject: None,
+            sync: false,
+            revocation_sync: false,
+            disable_reconcile: false,
+            reconcile_verbose: false,
+            reconcile_interval_seconds: 30,
+            change_watch_interval_ms: 1000,
+            network_change_trigger_path: None,
+            one_shot: true,
+            connect_protocol: None,
+            connect_peer: None,
+            connect_class: "interactive".to_string(),
+        }
+    }
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time should advance")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{suffix}.tmp"))
     }
 }
