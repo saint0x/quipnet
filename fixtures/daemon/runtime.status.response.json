@@ -1,0 +1,42 @@
+{
+  "ok": true,
+  "request_id": "req-runtime-status-1",
+  "result": {
+    "truth_kind": "runtime",
+    "daemon_health": "degraded",
+    "identity": {
+      "status": "loaded",
+      "path": "/Users/operator/.quip/identity/node.json",
+      "node_id": "ed25519:local-peer"
+    },
+    "durable_state": {
+      "status": "loaded",
+      "path": "/Users/operator/.quip/net/state.json",
+      "schema_version": 1
+    },
+    "authority": {
+      "sync_status": "policy_enforced",
+      "last_accepted_revision": "rev-0042",
+      "health": "degraded",
+      "local_policy_denied": true,
+      "authority_subject_mismatch": false,
+      "reevaluated_sessions": 3,
+      "closed_sessions": 1,
+      "degraded_sessions": 1,
+      "migrated_sessions": 1,
+      "unchanged_sessions": 0,
+      "reevaluated_listeners": 2,
+      "suppressed_listeners": 1,
+      "restored_listeners": 0,
+      "reconnect_suppressions_added": 1,
+      "reconnect_suppressions_cleared": 0,
+      "local_policy_reason": "membership revoked"
+    },
+    "runtime_summary": {
+      "session_count": 2,
+      "active_path_count": 1,
+      "reconnect_state": "suppressed"
+    }
+  },
+  "error": null
+}

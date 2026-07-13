@@ -18,11 +18,12 @@ Use identity inspection when you need to answer:
 - whether the deployed node matches the operator's expectation
 
 Baseline procedure:
-1. Confirm the expected durable identity path for the environment.
+1. Run `quip identity path` to confirm the exact identity file path, file kind, size, permissions, passphrase env, and control discovery path for this node.
 2. Verify that `identity/node.json` exists and has correct ownership and permissions.
 3. Confirm the passphrase source configured for the node.
-4. Compare the node's expected identity with deployment records or authority-side expectations.
-5. If the file is missing, corrupted, or unexpected, stop and treat it as an identity incident rather than guessing.
+4. Run `quip identity verify` to compare the loaded daemon identity against durable state and authority expectations.
+5. Compare the node's expected identity with deployment records or authority-side expectations.
+6. If the file is missing, corrupted, or unexpected, stop and treat it as an identity incident rather than guessing.
 
 Do not silently generate a new identity on a production node that is supposed to remain the same logical participant.
 
@@ -34,10 +35,10 @@ Use runtime mismatch diagnosis when:
 - direct or relay behavior is not matching stored state or authority state
 
 Baseline procedure:
-1. Confirm the node is using the expected durable identity and state paths.
-2. Confirm the authority bootstrap inputs are the expected ones for the environment.
-3. Compare durable state expectations with the live daemon status.
-4. Check whether the issue is runtime-only, durable-state-only, or authority-driven.
+1. Run `quip runtime target` to confirm the live daemon discovery target, runtime instance id, pid, network, and the exact durable paths the operator surface is pointed at.
+2. Run `quip runtime diagnose --events-limit <n>` to classify the problem as `healthy`, `runtime_only`, `authority_driven`, `durable_state_only`, or `mixed`.
+3. Inspect the reported issues and confirm whether they are durable-state, authority, or runtime failures before taking action.
+4. Use the attached session, path, listener, and event inventory from `runtime diagnose` to confirm whether the issue is live, recently closed, or only remembered on disk.
 5. Restart `quipd` only after confirming the restart will not destroy evidence needed for diagnosis.
 
 The important split is:
@@ -57,13 +58,12 @@ Typical reasons:
 - controlled recovery after a known operational failure
 
 Baseline procedure:
-1. Stop `quipd`.
-2. Run `quip state backup` or `quip state export` to capture the current durable identity and network state bundle before changing anything.
-3. Preserve the previous bundle for rollback or analysis.
-4. Run `quip state reset --confirm` so only durable network state is removed.
-5. Keep `~/.quip/identity/node.json` unchanged.
-6. Restart `quipd`.
-7. Re-bootstrap and verify the node rejoins as the same logical identity.
+1. Run `quip state backup` or `quip state export` to capture the current durable identity and network state bundle before changing anything.
+2. Preserve the previous bundle for rollback or analysis.
+3. Run `quip state reset --confirm` through the live daemon so only durable network state is removed.
+4. Keep `~/.quip/identity/node.json` unchanged.
+5. Restart `quipd` after reset completes.
+6. Re-bootstrap and verify the node rejoins as the same logical identity.
 
 State reset is not identity rotation. If the identity file changes, the operator is doing a different operation.
 

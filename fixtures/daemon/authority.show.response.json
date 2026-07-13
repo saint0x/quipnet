@@ -2,14 +2,38 @@
   "ok": true,
   "request_id": "req-3000",
   "result": {
-    "truth_kind": "runtime_and_durable",
-    "configured_authority": {
-      "origin": "https://authority.quip.example",
-      "subject": "authority-root"
-    },
-    "accepted_authority": {
+    "truth_kind": "runtime",
+    "configured_origin": "https://authority.quip.example",
+    "configured_subject": "authority-root",
+    "configured_snapshot": null,
+    "network": "personalcloud-prod",
+    "local_peer_id": "ed25519:local-peer",
+    "membership_subject_peer_id": "ed25519:local-peer",
+    "membership_issuer_peer_id": "ed25519:authority-peer",
+    "membership_roles": ["member"],
+    "grants": 3,
+    "revocations": 1,
+    "denied_peers": 1,
+    "bootstrap_hints": 2,
+    "relays": 1,
+    "schema_version": 1,
+    "authority": {
+      "sync_status": "in_sync",
       "last_accepted_revision": "rev-0042",
-      "last_sync_status": "in_sync"
+      "health": "ready",
+      "local_policy_denied": false,
+      "authority_subject_mismatch": false,
+      "reevaluated_sessions": 2,
+      "closed_sessions": 0,
+      "degraded_sessions": 0,
+      "migrated_sessions": 1,
+      "unchanged_sessions": 1,
+      "reevaluated_listeners": 1,
+      "suppressed_listeners": 0,
+      "restored_listeners": 0,
+      "reconnect_suppressions_added": 0,
+      "reconnect_suppressions_cleared": 1,
+      "local_policy_reason": null
     }
   },
   "error": null

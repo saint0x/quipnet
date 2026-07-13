@@ -5,12 +5,12 @@ use daemonapi::{
     AuthorityShowResult, AuthoritySyncOriginPayload, AuthoritySyncResult,
     AuthoritySyncRevocationsOriginPayload, AuthoritySyncSnapshotPayload, DaemonEndpointDiscovery,
     IdentityShowResult, IdentityVerifyResult, RequestAuth, RequestEnvelope, ResponseEnvelope,
-    RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
-    RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
-    RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
-    SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
-    SessionUpgradePayload, SessionUpgradeResult, StateExportPayload, StateExportResult,
-    StateResetPayload, StateResetResult, StateShowResult, StateValidateResult,
+    RuntimeDiagnoseResult, RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry,
+    RuntimeListenersListResult, RuntimePathAlternativeEntry, RuntimePathEntry,
+    RuntimePathsListResult, RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload,
+    SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionReconcilePayload,
+    SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult, StateExportPayload,
+    StateExportResult, StateResetPayload, StateResetResult, StateShowResult, StateValidateResult,
 };
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
@@ -130,6 +130,11 @@ enum PathCommand {
 
 #[derive(Subcommand, Debug)]
 enum RuntimeCommand {
+    Target,
+    Diagnose {
+        #[arg(long, default_value_t = 16)]
+        events_limit: usize,
+    },
     Sessions,
     Listeners,
     Paths,
@@ -231,6 +236,7 @@ enum AuthorityCommand {
 
 #[derive(Subcommand, Debug)]
 enum IdentityCommand {
+    Path,
     Show,
     Verify,
     Init {
@@ -378,6 +384,96 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
         }
         Command::Runtime { command } => match command {
+            RuntimeCommand::Target => {
+                let discovery = load_daemon_discovery(&cli.control_discovery_path)?;
+                println!(
+                    "endpoint={} discovery_path={} network={} state_path={} identity_path={} runtime_instance_id={} pid={} started_at_unix_secs={}",
+                    discovery.endpoint,
+                    cli.control_discovery_path,
+                    discovery.network,
+                    discovery.state_path,
+                    discovery.identity_path,
+                    discovery.runtime_instance_id,
+                    discovery.pid,
+                    discovery.started_at_unix_secs,
+                );
+            }
+            RuntimeCommand::Diagnose { events_limit } => {
+                let discovery = load_daemon_discovery(&cli.control_discovery_path)?;
+                let diagnose = daemon_request::<RuntimeDiagnoseResult>(
+                    &cli,
+                    "runtime.diagnose",
+                    json!({ "event_limit": events_limit }),
+                )?;
+                println!(
+                    "classification={} issues={} endpoint={} runtime_instance_id={} pid={} discovery_network={} discovery_state_path={} discovery_identity_path={} daemon_health={} durable_state_valid={} identity_match={} authority_sync={} authority_health={} reconnect_state={} sessions={} paths={} listeners={} events={} truth_kind={}",
+                    diagnose.primary_classification,
+                    diagnose.issues.len(),
+                    discovery.endpoint,
+                    discovery.runtime_instance_id,
+                    discovery.pid,
+                    discovery.network,
+                    discovery.state_path,
+                    discovery.identity_path,
+                    diagnose.status.daemon_health,
+                    diagnose.state.valid,
+                    diagnose.identity.match_result,
+                    diagnose.authority_show.authority.sync_status,
+                    diagnose.authority_show.authority.health,
+                    diagnose.health.reconnect_state,
+                    diagnose.sessions.len(),
+                    diagnose.paths.len(),
+                    diagnose.listeners.len(),
+                    diagnose.events.len(),
+                    diagnose.truth_kind,
+                );
+                for issue in &diagnose.issues {
+                    println!(
+                        "issue_code={} severity={} layer={} summary={}",
+                        issue.code, issue.severity, issue.layer, issue.summary
+                    );
+                }
+                for session in &diagnose.sessions {
+                    println!(
+                        "session_id={} peer={} state={} closure_reason={} state_reason={} path={} age_seconds={} last_activity_seconds={} truth_kind={}",
+                        session.session_id,
+                        session.peer_id,
+                        session.state,
+                        session.closure_reason.as_deref().unwrap_or("none"),
+                        session.state_reason.as_deref().unwrap_or("none"),
+                        session.active_path_class,
+                        session.age_seconds,
+                        session.last_activity_seconds,
+                        diagnose.truth_kind
+                    );
+                }
+                emit_runtime_listeners(&RuntimeListenersListResult {
+                    truth_kind: diagnose.truth_kind.clone(),
+                    listeners: diagnose.listeners.clone(),
+                });
+                emit_runtime_paths(&RuntimePathsListResult {
+                    truth_kind: diagnose.truth_kind.clone(),
+                    paths: diagnose.paths.clone(),
+                });
+                emit_runtime_health(&diagnose.health);
+                if diagnose.events.is_empty() {
+                    println!("event_truth_kind={} events=0", diagnose.truth_kind);
+                } else {
+                    for event in &diagnose.events {
+                        println!(
+                            "event_id={} event_type={} emitted_at={} event_truth_kind={} subject_kind={} subject_id={} details={} truth_kind={}",
+                            event.event_id,
+                            event.event_type,
+                            event.emitted_at,
+                            event.truth_kind,
+                            event.subject_kind,
+                            event.subject_id,
+                            serde_json::to_string(&event.details)?,
+                            diagnose.truth_kind
+                        );
+                    }
+                }
+            }
             RuntimeCommand::Sessions => {
                 let sessions = daemon_request::<RuntimeSessionsListResult>(
                     &cli,
@@ -1190,6 +1286,47 @@ async fn run() -> Result<(), Box<dyn Error>> {
             }
         },
         Command::Identity { command } => match command {
+            IdentityCommand::Path => {
+                let path = PathBuf::from(&cli.identity_path);
+                let metadata = std::fs::metadata(&path).ok();
+                let exists = metadata.is_some();
+                let kind = metadata
+                    .as_ref()
+                    .map(|metadata| {
+                        if metadata.is_file() {
+                            "file"
+                        } else if metadata.is_dir() {
+                            "dir"
+                        } else {
+                            "other"
+                        }
+                    })
+                    .unwrap_or("missing");
+                let bytes = metadata
+                    .as_ref()
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                #[cfg(unix)]
+                let mode = metadata
+                    .as_ref()
+                    .map(|metadata| {
+                        use std::os::unix::fs::PermissionsExt;
+                        format!("{:o}", metadata.permissions().mode() & 0o777)
+                    })
+                    .unwrap_or_else(|| "none".to_string());
+                #[cfg(not(unix))]
+                let mode = "unknown".to_string();
+                println!(
+                    "identity_path={} exists={} kind={} bytes={} mode={} passphrase_env={} control_discovery_path={}",
+                    cli.identity_path,
+                    exists,
+                    kind,
+                    bytes,
+                    mode,
+                    cli.identity_passphrase_env,
+                    cli.control_discovery_path,
+                );
+            }
             IdentityCommand::Show => {
                 let identity =
                     daemon_request::<IdentityShowResult>(&cli, "identity.show", json!({}))?;
@@ -1733,6 +1870,182 @@ fn load_daemon_discovery(path: &str) -> Result<DaemonEndpointDiscovery, Box<dyn 
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeDiagnoseIssue {
+    code: &'static str,
+    severity: &'static str,
+    layer: &'static str,
+    summary: String,
+}
+
+#[cfg(test)]
+fn runtime_diagnose_issues(
+    status: &RuntimeStatusResult,
+    health: &RuntimeHealthResult,
+    state: &StateShowResult,
+    identity: &IdentityVerifyResult,
+    authority: &AuthorityShowResult,
+    sessions: &[daemonapi::RuntimeSessionEntry],
+    paths: &[daemonapi::RuntimePathEntry],
+) -> Vec<RuntimeDiagnoseIssue> {
+    let mut issues = Vec::new();
+
+    if !state.present {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "durable_state_missing",
+            severity: "error",
+            layer: "durable",
+            summary: "durable network state file is missing".to_string(),
+        });
+    } else if !state.valid {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "durable_state_invalid",
+            severity: "error",
+            layer: "durable",
+            summary: "durable network state failed validation".to_string(),
+        });
+    }
+
+    if identity.match_result != "matched" {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "identity_mismatch",
+            severity: "error",
+            layer: "durable",
+            summary: format!("identity verification returned {}", identity.match_result),
+        });
+    }
+
+    if authority.authority.authority_subject_mismatch {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "authority_subject_mismatch",
+            severity: "error",
+            layer: "authority",
+            summary: "authority subject does not match the local runtime identity".to_string(),
+        });
+    }
+    if authority.authority.local_policy_denied {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "authority_policy_denied",
+            severity: "error",
+            layer: "authority",
+            summary: authority
+                .authority
+                .local_policy_reason
+                .clone()
+                .unwrap_or_else(|| "authority policy denied local runtime behavior".to_string()),
+        });
+    } else if authority.authority.sync_status != "in_sync" || authority.authority.health != "ready"
+    {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "authority_not_ready",
+            severity: if authority.authority.health == "failed" {
+                "error"
+            } else {
+                "warn"
+            },
+            layer: "authority",
+            summary: format!(
+                "authority reports sync_status={} health={}",
+                authority.authority.sync_status, authority.authority.health
+            ),
+        });
+    }
+
+    if status.daemon_health != "ready" {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "daemon_not_ready",
+            severity: if status.daemon_health == "failed" {
+                "error"
+            } else {
+                "warn"
+            },
+            layer: "runtime",
+            summary: format!("daemon health is {}", status.daemon_health),
+        });
+    }
+    if health.reconnect_state == "suppressed" {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "reconnect_suppressed",
+            severity: "warn",
+            layer: "runtime",
+            summary: format!(
+                "reconnect is suppressed with {} active suppression entries",
+                health.reconnect_suppression_count
+            ),
+        });
+    }
+    if health.reconnect_state == "failed" {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "reconnect_failed",
+            severity: "error",
+            layer: "runtime",
+            summary: format!(
+                "reconnect has failed after {} tracked attempts",
+                health.reconnect_attempt_count
+            ),
+        });
+    }
+    if sessions.iter().any(|session| session.state == "failed") {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "failed_sessions_present",
+            severity: "error",
+            layer: "runtime",
+            summary: "one or more runtime sessions are in failed state".to_string(),
+        });
+    }
+    if sessions.iter().any(|session| session.state == "degraded") {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "degraded_sessions_present",
+            severity: "warn",
+            layer: "runtime",
+            summary: "one or more runtime sessions are degraded".to_string(),
+        });
+    }
+    if sessions.iter().any(|session| session.state == "closing") {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "closing_sessions_present",
+            severity: "warn",
+            layer: "runtime",
+            summary: "one or more runtime sessions are closing".to_string(),
+        });
+    }
+    if !sessions.is_empty() && health.active_paths == 0 {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "sessions_without_active_paths",
+            severity: "error",
+            layer: "runtime",
+            summary: "runtime has sessions but no active paths".to_string(),
+        });
+    }
+    if paths.iter().any(|path| path.state == "failed") {
+        issues.push(RuntimeDiagnoseIssue {
+            code: "failed_paths_present",
+            severity: "warn",
+            layer: "runtime",
+            summary: "one or more runtime paths are in failed state".to_string(),
+        });
+    }
+
+    issues
+}
+
+#[cfg(test)]
+fn runtime_diagnose_classification(issues: &[RuntimeDiagnoseIssue]) -> &'static str {
+    if issues.is_empty() {
+        return "healthy";
+    }
+    let has_runtime = issues.iter().any(|issue| issue.layer == "runtime");
+    let has_authority = issues.iter().any(|issue| issue.layer == "authority");
+    let has_durable = issues.iter().any(|issue| issue.layer == "durable");
+    match (has_runtime, has_authority, has_durable) {
+        (true, false, false) => "runtime_only",
+        (false, true, false) => "authority_driven",
+        (false, false, true) => "durable_state_only",
+        _ => "mixed",
+    }
+}
+
 fn hex_public_key(identity: &IdentityKeypair) -> String {
     identity
         .public_key()
@@ -2095,5 +2408,241 @@ mod tests {
         }
 
         assert_eq!(expanded, "/tmp/quip-home/.quip/net/state.json");
+    }
+
+    #[test]
+    fn runtime_diagnose_classification_detects_runtime_only_issues() {
+        let status = RuntimeStatusResult {
+            truth_kind: "runtime".to_string(),
+            daemon_health: "degraded".to_string(),
+            identity: daemonapi::IdentityStatus {
+                status: "loaded".to_string(),
+                path: "/tmp/identity.json".to_string(),
+                node_id: "peer-a".to_string(),
+            },
+            durable_state: daemonapi::DurableStateStatus {
+                status: "loaded".to_string(),
+                path: "/tmp/state.json".to_string(),
+                schema_version: 1,
+            },
+            authority: daemonapi::AuthoritySyncStatus {
+                sync_status: "in_sync".to_string(),
+                last_accepted_revision: "rev-1".to_string(),
+                health: "ready".to_string(),
+                local_policy_denied: false,
+                authority_subject_mismatch: false,
+                reevaluated_sessions: 0,
+                closed_sessions: 0,
+                degraded_sessions: 0,
+                migrated_sessions: 0,
+                unchanged_sessions: 0,
+                reevaluated_listeners: 0,
+                suppressed_listeners: 0,
+                restored_listeners: 0,
+                reconnect_suppressions_added: 0,
+                reconnect_suppressions_cleared: 0,
+                local_policy_reason: None,
+            },
+            runtime_summary: daemonapi::RuntimeSummary {
+                session_count: 1,
+                active_path_count: 0,
+                reconnect_state: "failed".to_string(),
+            },
+        };
+        let health = RuntimeHealthResult {
+            truth_kind: "runtime".to_string(),
+            daemon_readiness: "failed".to_string(),
+            authority_sync_health: "ready".to_string(),
+            authority_subject_status: "matched".to_string(),
+            authority_deny_reason: None,
+            runtime_registry_health: "ready".to_string(),
+            path_manager_health: "degraded".to_string(),
+            reconnect_subsystem_health: "failed".to_string(),
+            active_sessions: 1,
+            active_paths: 0,
+            active_listeners: 0,
+            reconnect_state: "failed".to_string(),
+            reconnect_attempt_count: 3,
+            reconnect_next_attempt_unix_secs: None,
+            reconnect_suppression_count: 0,
+            runtime_event_buffer_depth: 4,
+        };
+        let state = StateShowResult {
+            truth_kind: "durable".to_string(),
+            state_path: "/tmp/state.json".to_string(),
+            present: true,
+            schema_version: Some(1),
+            valid: true,
+            violations: Vec::new(),
+            summary: None,
+        };
+        let identity = IdentityVerifyResult {
+            truth_kind: "durable".to_string(),
+            identity_path: "/tmp/identity.json".to_string(),
+            expected_node_id: None,
+            loaded_node_id: "peer-a".to_string(),
+            authority_subject_peer_id: None,
+            match_result: "matched".to_string(),
+            mismatch_reasons: Vec::new(),
+        };
+        let authority = AuthorityShowResult {
+            truth_kind: "runtime".to_string(),
+            configured_origin: None,
+            configured_subject: None,
+            configured_snapshot: None,
+            network: "net".to_string(),
+            local_peer_id: "peer-a".to_string(),
+            membership_subject_peer_id: "peer-a".to_string(),
+            membership_issuer_peer_id: "peer-b".to_string(),
+            membership_roles: vec!["member".to_string()],
+            grants: 0,
+            revocations: 0,
+            denied_peers: 0,
+            bootstrap_hints: 0,
+            relays: 0,
+            schema_version: 1,
+            authority: status.authority.clone(),
+        };
+        let sessions = vec![daemonapi::RuntimeSessionEntry {
+            session_id: "sess-1".to_string(),
+            peer_id: "peer-b".to_string(),
+            state: "failed".to_string(),
+            closure_reason: Some("remote_failure".to_string()),
+            state_reason: Some("dial exhausted".to_string()),
+            active_path_class: "relay".to_string(),
+            age_seconds: 1,
+            last_activity_seconds: 1,
+        }];
+        let paths = vec![daemonapi::RuntimePathEntry {
+            session_id: Some("sess-1".to_string()),
+            peer_id: "peer-b".to_string(),
+            protocol: Some("/quicnet/control/1".to_string()),
+            class: "interactive".to_string(),
+            state: "failed".to_string(),
+            path_class: "relay".to_string(),
+            source: "authority_relay".to_string(),
+            relay_peer_id: Some("relay-1".to_string()),
+            endpoint_summary: "relay=relay-1".to_string(),
+            score: Some(10),
+            state_reason: Some("reconnect exhausted".to_string()),
+            decision_reason: Some("strengths=continuity".to_string()),
+            summary: "failed path".to_string(),
+            alternatives: Vec::new(),
+        }];
+
+        let issues = runtime_diagnose_issues(
+            &status, &health, &state, &identity, &authority, &sessions, &paths,
+        );
+
+        assert_eq!(runtime_diagnose_classification(&issues), "runtime_only");
+        assert!(issues.iter().any(|issue| issue.code == "reconnect_failed"));
+        assert!(issues
+            .iter()
+            .any(|issue| issue.code == "failed_sessions_present"));
+    }
+
+    #[test]
+    fn runtime_diagnose_classification_detects_mixed_issues() {
+        let mut status = RuntimeStatusResult {
+            truth_kind: "runtime".to_string(),
+            daemon_health: "ready".to_string(),
+            identity: daemonapi::IdentityStatus {
+                status: "loaded".to_string(),
+                path: "/tmp/identity.json".to_string(),
+                node_id: "peer-a".to_string(),
+            },
+            durable_state: daemonapi::DurableStateStatus {
+                status: "loaded".to_string(),
+                path: "/tmp/state.json".to_string(),
+                schema_version: 1,
+            },
+            authority: daemonapi::AuthoritySyncStatus {
+                sync_status: "out_of_sync".to_string(),
+                last_accepted_revision: "rev-1".to_string(),
+                health: "degraded".to_string(),
+                local_policy_denied: false,
+                authority_subject_mismatch: false,
+                reevaluated_sessions: 0,
+                closed_sessions: 0,
+                degraded_sessions: 0,
+                migrated_sessions: 0,
+                unchanged_sessions: 0,
+                reevaluated_listeners: 0,
+                suppressed_listeners: 0,
+                restored_listeners: 0,
+                reconnect_suppressions_added: 0,
+                reconnect_suppressions_cleared: 0,
+                local_policy_reason: None,
+            },
+            runtime_summary: daemonapi::RuntimeSummary {
+                session_count: 0,
+                active_path_count: 0,
+                reconnect_state: "idle".to_string(),
+            },
+        };
+        let health = RuntimeHealthResult {
+            truth_kind: "runtime".to_string(),
+            daemon_readiness: "ready".to_string(),
+            authority_sync_health: "degraded".to_string(),
+            authority_subject_status: "matched".to_string(),
+            authority_deny_reason: None,
+            runtime_registry_health: "ready".to_string(),
+            path_manager_health: "ready".to_string(),
+            reconnect_subsystem_health: "ready".to_string(),
+            active_sessions: 0,
+            active_paths: 0,
+            active_listeners: 0,
+            reconnect_state: "idle".to_string(),
+            reconnect_attempt_count: 0,
+            reconnect_next_attempt_unix_secs: None,
+            reconnect_suppression_count: 0,
+            runtime_event_buffer_depth: 0,
+        };
+        let state = StateShowResult {
+            truth_kind: "durable".to_string(),
+            state_path: "/tmp/state.json".to_string(),
+            present: true,
+            schema_version: Some(1),
+            valid: false,
+            violations: vec![daemonapi::DurableStateViolationEntry {
+                path: "/schema_version".to_string(),
+                message: "unsupported".to_string(),
+            }],
+            summary: None,
+        };
+        let identity = IdentityVerifyResult {
+            truth_kind: "durable".to_string(),
+            identity_path: "/tmp/identity.json".to_string(),
+            expected_node_id: None,
+            loaded_node_id: "peer-a".to_string(),
+            authority_subject_peer_id: None,
+            match_result: "matched".to_string(),
+            mismatch_reasons: Vec::new(),
+        };
+        let authority = AuthorityShowResult {
+            truth_kind: "runtime".to_string(),
+            configured_origin: None,
+            configured_subject: None,
+            configured_snapshot: None,
+            network: "net".to_string(),
+            local_peer_id: "peer-a".to_string(),
+            membership_subject_peer_id: "peer-a".to_string(),
+            membership_issuer_peer_id: "peer-b".to_string(),
+            membership_roles: vec!["member".to_string()],
+            grants: 0,
+            revocations: 0,
+            denied_peers: 0,
+            bootstrap_hints: 0,
+            relays: 0,
+            schema_version: 1,
+            authority: status.authority.clone(),
+        };
+        let issues =
+            runtime_diagnose_issues(&status, &health, &state, &identity, &authority, &[], &[]);
+
+        status.authority.health = "degraded".to_string();
+        assert_eq!(runtime_diagnose_classification(&issues), "mixed");
+        assert!(issues.iter().any(|issue| issue.layer == "durable"));
+        assert!(issues.iter().any(|issue| issue.layer == "authority"));
     }
 }

@@ -8,28 +8,87 @@
         "result": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["truth_kind", "configured_authority", "accepted_authority"],
+          "required": [
+            "truth_kind",
+            "configured_origin",
+            "configured_subject",
+            "configured_snapshot",
+            "network",
+            "local_peer_id",
+            "membership_subject_peer_id",
+            "membership_issuer_peer_id",
+            "membership_roles",
+            "grants",
+            "revocations",
+            "denied_peers",
+            "bootstrap_hints",
+            "relays",
+            "schema_version",
+            "authority"
+          ],
           "properties": {
-            "truth_kind": { "const": "runtime_and_durable" },
-            "configured_authority": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["origin"],
-              "properties": {
-                "origin": { "type": "string", "minLength": 1 },
-                "subject": { "type": "string", "minLength": 1 }
-              }
+            "truth_kind": { "const": "runtime" },
+            "configured_origin": { "type": ["string", "null"], "minLength": 1 },
+            "configured_subject": { "type": ["string", "null"], "minLength": 1 },
+            "configured_snapshot": { "type": ["string", "null"], "minLength": 1 },
+            "network": { "type": "string", "minLength": 1 },
+            "local_peer_id": { "type": "string", "minLength": 1 },
+            "membership_subject_peer_id": { "type": "string", "minLength": 1 },
+            "membership_issuer_peer_id": { "type": "string", "minLength": 1 },
+            "membership_roles": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
             },
-            "accepted_authority": {
+            "grants": { "type": "integer", "minimum": 0 },
+            "revocations": { "type": "integer", "minimum": 0 },
+            "denied_peers": { "type": "integer", "minimum": 0 },
+            "bootstrap_hints": { "type": "integer", "minimum": 0 },
+            "relays": { "type": "integer", "minimum": 0 },
+            "schema_version": { "type": "integer", "minimum": 1 },
+            "authority": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["last_accepted_revision", "last_sync_status"],
+              "required": [
+                "sync_status",
+                "last_accepted_revision",
+                "health",
+                "local_policy_denied",
+                "authority_subject_mismatch",
+                "reevaluated_sessions",
+                "closed_sessions",
+                "degraded_sessions",
+                "migrated_sessions",
+                "unchanged_sessions",
+                "reevaluated_listeners",
+                "suppressed_listeners",
+                "restored_listeners",
+                "reconnect_suppressions_added",
+                "reconnect_suppressions_cleared",
+                "local_policy_reason"
+              ],
               "properties": {
-                "last_accepted_revision": { "type": "string", "minLength": 1 },
-                "last_sync_status": {
+                "sync_status": {
                   "type": "string",
-                  "enum": ["in_sync", "syncing", "stale", "failed"]
-                }
+                  "enum": ["in_sync", "syncing", "stale", "failed", "policy_enforced", "subject_mismatch"]
+                },
+                "last_accepted_revision": { "type": "string", "minLength": 1 },
+                "health": {
+                  "type": "string",
+                  "enum": ["ready", "degraded", "failed", "suppressed"]
+                },
+                "local_policy_denied": { "type": "boolean" },
+                "authority_subject_mismatch": { "type": "boolean" },
+                "reevaluated_sessions": { "type": "integer", "minimum": 0 },
+                "closed_sessions": { "type": "integer", "minimum": 0 },
+                "degraded_sessions": { "type": "integer", "minimum": 0 },
+                "migrated_sessions": { "type": "integer", "minimum": 0 },
+                "unchanged_sessions": { "type": "integer", "minimum": 0 },
+                "reevaluated_listeners": { "type": "integer", "minimum": 0 },
+                "suppressed_listeners": { "type": "integer", "minimum": 0 },
+                "restored_listeners": { "type": "integer", "minimum": 0 },
+                "reconnect_suppressions_added": { "type": "integer", "minimum": 0 },
+                "reconnect_suppressions_cleared": { "type": "integer", "minimum": 0 },
+                "local_policy_reason": { "type": ["string", "null"] }
               }
             }
           }

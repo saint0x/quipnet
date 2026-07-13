@@ -1,0 +1,217 @@
+{
+  "ok": true,
+  "request_id": "req-runtime-diagnose-1",
+  "result": {
+    "truth_kind": "runtime",
+    "primary_classification": "mixed",
+    "issues": [
+      {
+        "code": "identity_mismatch",
+        "severity": "error",
+        "layer": "durable",
+        "summary": "identity verification returned mismatch"
+      },
+      {
+        "code": "reconnect_suppressed",
+        "severity": "warn",
+        "layer": "runtime",
+        "summary": "reconnect is suppressed with 1 active suppression entries"
+      }
+    ],
+    "status": {
+      "truth_kind": "runtime",
+      "daemon_health": "degraded",
+      "identity": {
+        "status": "loaded",
+        "path": "/Users/operator/.quip/identity/node.json",
+        "node_id": "ed25519:local-peer"
+      },
+      "durable_state": {
+        "status": "loaded",
+        "path": "/Users/operator/.quip/net/state.json",
+        "schema_version": 1
+      },
+      "authority": {
+        "sync_status": "policy_enforced",
+        "last_accepted_revision": "rev-0042",
+        "health": "degraded",
+        "local_policy_denied": true,
+        "authority_subject_mismatch": false,
+        "reevaluated_sessions": 3,
+        "closed_sessions": 1,
+        "degraded_sessions": 1,
+        "migrated_sessions": 1,
+        "unchanged_sessions": 0,
+        "reevaluated_listeners": 2,
+        "suppressed_listeners": 1,
+        "restored_listeners": 0,
+        "reconnect_suppressions_added": 1,
+        "reconnect_suppressions_cleared": 0,
+        "local_policy_reason": "membership revoked"
+      },
+      "runtime_summary": {
+        "session_count": 2,
+        "active_path_count": 1,
+        "reconnect_state": "suppressed"
+      }
+    },
+    "health": {
+      "truth_kind": "runtime",
+      "daemon_readiness": "suppressed",
+      "authority_sync_health": "ready",
+      "authority_subject_status": "matched",
+      "authority_deny_reason": "membership revoked",
+      "runtime_registry_health": "ready",
+      "path_manager_health": "ready",
+      "reconnect_subsystem_health": "suppressed",
+      "active_sessions": 1,
+      "active_paths": 1,
+      "active_listeners": 1,
+      "reconnect_state": "suppressed",
+      "reconnect_attempt_count": 2,
+      "reconnect_next_attempt_unix_secs": 1720000123,
+      "reconnect_suppression_count": 1,
+      "runtime_event_buffer_depth": 12
+    },
+    "state": {
+      "truth_kind": "durable",
+      "state_path": "/Users/operator/.quip/net/state.json",
+      "present": true,
+      "schema_version": 1,
+      "valid": true,
+      "violations": [],
+      "summary": {
+        "network": "personalcloud-prod",
+        "local_peer_id": "ed25519:local-peer",
+        "roles": ["member"],
+        "bootstrap_hints": 2,
+        "relays": 1,
+        "peers": 4,
+        "capability_grants": 3,
+        "revocations": 1,
+        "denied_peers": 1,
+        "path_candidates": 2
+      }
+    },
+    "identity": {
+      "truth_kind": "runtime_and_durable",
+      "identity_path": "/Users/operator/.quip/identity/node.json",
+      "expected_node_id": "ed25519:durable-peer",
+      "loaded_node_id": "ed25519:local-peer",
+      "authority_subject_peer_id": "ed25519:local-peer",
+      "match_result": "mismatch",
+      "mismatch_reasons": [
+        "durable state expects ed25519:durable-peer but daemon loaded ed25519:local-peer"
+      ]
+    },
+    "authority_show": {
+      "truth_kind": "runtime",
+      "configured_origin": "https://authority.quip.example",
+      "configured_subject": "authority-root",
+      "configured_snapshot": null,
+      "network": "personalcloud-prod",
+      "local_peer_id": "ed25519:local-peer",
+      "membership_subject_peer_id": "ed25519:local-peer",
+      "membership_issuer_peer_id": "ed25519:authority-peer",
+      "membership_roles": ["member"],
+      "grants": 3,
+      "revocations": 1,
+      "denied_peers": 1,
+      "bootstrap_hints": 2,
+      "relays": 1,
+      "schema_version": 1,
+      "authority": {
+        "sync_status": "policy_enforced",
+        "last_accepted_revision": "rev-0042",
+        "health": "degraded",
+        "local_policy_denied": true,
+        "authority_subject_mismatch": false,
+        "reevaluated_sessions": 3,
+        "closed_sessions": 1,
+        "degraded_sessions": 1,
+        "migrated_sessions": 1,
+        "unchanged_sessions": 0,
+        "reevaluated_listeners": 2,
+        "suppressed_listeners": 1,
+        "restored_listeners": 0,
+        "reconnect_suppressions_added": 1,
+        "reconnect_suppressions_cleared": 0,
+        "local_policy_reason": "membership revoked"
+      }
+    },
+    "sessions": [
+      {
+        "session_id": "9f10f8e8f34137b1eecce5e7ab9e843a",
+        "peer_id": "ed25519:active-peer",
+        "state": "active",
+        "closure_reason": null,
+        "state_reason": "direct session is healthy",
+        "active_path_class": "direct",
+        "age_seconds": 18,
+        "last_activity_seconds": 2
+      },
+      {
+        "session_id": "7aa9970bb08e2e17ba6304edb1ed74cc",
+        "peer_id": "ed25519:closed-peer",
+        "state": "closed",
+        "closure_reason": "operator_requested",
+        "state_reason": "operator requested close",
+        "active_path_class": "relay",
+        "age_seconds": 48,
+        "last_activity_seconds": 5
+      }
+    ],
+    "listeners": [
+      {
+        "listener_id": "listener-1",
+        "transport": "quic",
+        "bind_summary": "0.0.0.0:9443",
+        "protocol": "/quicnet/control/1",
+        "advertise": true,
+        "state": "suppressed",
+        "state_reason": "authority policy temporarily denies exposure",
+        "age_seconds": 120
+      }
+    ],
+    "paths": [
+      {
+        "session_id": "9f10f8e8f34137b1eecce5e7ab9e843a",
+        "peer_id": "ed25519:active-peer",
+        "protocol": "/quicnet/control/1",
+        "class": "control",
+        "state": "active",
+        "path_class": "relay",
+        "source": "authority_relay",
+        "relay_peer_id": "ed25519:relay-peer",
+        "endpoint_summary": "relay=quic://203.0.113.70:443 destination=203.0.113.71:8443",
+        "score": 42,
+        "state_reason": "selected path still matches active session",
+        "decision_reason": "relay preserves continuity while direct remains less preferred for current runtime posture",
+        "summary": "Relay routing for ed25519:active-peer via ed25519:relay-peer from AuthorityRelay scores 42 for Control traffic",
+        "alternatives": [
+          {
+            "path_class": "direct",
+            "source": "observed",
+            "relay_peer_id": null,
+            "score": 55,
+            "summary": "DirectIpv6 routing for ed25519:active-peer via direct from Observed scores 55 for Control traffic"
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "event_id": "evt-1",
+        "event_type": "reconnect.suppressed",
+        "emitted_at": "2026-07-13T15:00:00Z",
+        "truth_kind": "runtime",
+        "subject_kind": "session",
+        "subject_id": "9f10f8e8f34137b1eecce5e7ab9e843a",
+        "details": {
+          "reason": "membership revoked"
+        }
+      }
+    ]
+  },
+  "error": null
+}

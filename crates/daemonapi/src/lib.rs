@@ -252,6 +252,35 @@ pub struct RuntimeSessionsListResult {
     pub sessions: Vec<RuntimeSessionEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RuntimeDiagnosePayload {
+    pub event_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDiagnoseResult {
+    pub truth_kind: String,
+    pub primary_classification: String,
+    pub issues: Vec<RuntimeDiagnosisIssue>,
+    pub status: RuntimeStatusResult,
+    pub health: RuntimeHealthResult,
+    pub state: StateShowResult,
+    pub identity: IdentityVerifyResult,
+    pub authority_show: AuthorityShowResult,
+    pub sessions: Vec<RuntimeSessionEntry>,
+    pub listeners: Vec<RuntimeListenerEntry>,
+    pub paths: Vec<RuntimePathEntry>,
+    pub events: Vec<RuntimeEventEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDiagnosisIssue {
+    pub code: String,
+    pub severity: String,
+    pub layer: String,
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeListenersListResult {
     pub truth_kind: String,
@@ -564,6 +593,18 @@ mod tests {
 
     #[test]
     fn daemon_fixtures_deserialize_and_schemas_expose_new_fields() {
+        let status: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/runtime.status.response.json"
+        ))
+        .expect("status fixture should deserialize");
+        assert!(status.ok);
+
+        let sessions: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/runtime.sessions.list.response.json"
+        ))
+        .expect("sessions fixture should deserialize");
+        assert!(sessions.ok);
+
         let listeners: ResponseEnvelope = serde_json::from_str(include_str!(
             "../../../fixtures/daemon/runtime.listeners.list.response.json"
         ))
@@ -587,6 +628,31 @@ mod tests {
         ))
         .expect("health fixture should deserialize");
         assert!(health.ok);
+
+        let diagnose: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/runtime.diagnose.response.json"
+        ))
+        .expect("diagnose fixture should deserialize");
+        assert!(diagnose.ok);
+
+        let sessions_result: RuntimeSessionsListResult = serde_json::from_value(
+            sessions
+                .result
+                .clone()
+                .expect("sessions result should exist"),
+        )
+        .expect("sessions result should deserialize");
+        assert!(sessions_result.sessions.iter().any(|entry| {
+            entry.state == "closed" && entry.closure_reason.as_deref() == Some("operator_requested")
+        }));
+
+        let status_result: RuntimeStatusResult =
+            serde_json::from_value(status.result.clone().expect("status result should exist"))
+                .expect("status result should deserialize");
+        assert_eq!(status_result.truth_kind, "runtime");
+        assert_eq!(status_result.authority.sync_status, "policy_enforced");
+        assert!(status_result.authority.local_policy_denied);
+
         let health_result: RuntimeHealthResult =
             serde_json::from_value(health.result.clone().expect("health result should exist"))
                 .expect("health result should deserialize");
@@ -601,6 +667,28 @@ mod tests {
         assert_eq!(events_result.events[0].truth_kind, "runtime");
         assert_eq!(events_result.events[0].subject_kind, "listener");
 
+        let diagnose_result: RuntimeDiagnoseResult = serde_json::from_value(
+            diagnose
+                .result
+                .clone()
+                .expect("diagnose result should exist"),
+        )
+        .expect("diagnose result should deserialize");
+        assert_eq!(diagnose_result.primary_classification, "mixed");
+        assert!(diagnose_result
+            .issues
+            .iter()
+            .any(|issue| issue.layer == "durable" && issue.code == "identity_mismatch"));
+        assert!(diagnose_result
+            .sessions
+            .iter()
+            .any(|entry| entry.state == "closed"));
+
+        let authority_show: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/authority.show.response.json"
+        ))
+        .expect("authority show fixture should deserialize");
+        assert!(authority_show.ok);
         let identity_show: ResponseEnvelope = serde_json::from_str(include_str!(
             "../../../fixtures/daemon/identity.show.response.json"
         ))
@@ -612,6 +700,15 @@ mod tests {
         ))
         .expect("identity verify fixture should deserialize");
         assert!(identity_verify.ok);
+        let authority_show_result: AuthorityShowResult = serde_json::from_value(
+            authority_show
+                .result
+                .clone()
+                .expect("authority show result should exist"),
+        )
+        .expect("authority show result should deserialize");
+        assert_eq!(authority_show_result.truth_kind, "runtime");
+        assert_eq!(authority_show_result.authority.sync_status, "in_sync");
 
         let state_show: ResponseEnvelope = serde_json::from_str(include_str!(
             "../../../fixtures/daemon/state.show.response.json"
@@ -708,6 +805,41 @@ mod tests {
         assert!(
             health_schema["allOf"][1]["properties"]["result"]["properties"]
                 .get("authority_deny_reason")
+                .is_some()
+        );
+
+        let status_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/runtime.status.response.schema.json"
+        ))
+        .expect("status schema should parse");
+        let authority_sync_enum = &status_schema["allOf"][1]["properties"]["result"]["properties"]
+            ["authority"]["properties"]["sync_status"]["enum"];
+        assert!(authority_sync_enum
+            .as_array()
+            .expect("authority sync enum should be an array")
+            .iter()
+            .any(|value| value == "policy_enforced"));
+        assert!(
+            status_schema["allOf"][1]["properties"]["result"]["properties"]["authority"]
+                ["properties"]
+                .get("local_policy_denied")
+                .is_some()
+        );
+
+        let diagnose_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/runtime.diagnose.response.schema.json"
+        ))
+        .expect("diagnose schema should parse");
+        let classification_enum = &diagnose_schema["allOf"][1]["properties"]["result"]
+            ["properties"]["primary_classification"]["enum"];
+        assert!(classification_enum
+            .as_array()
+            .expect("classification enum should be an array")
+            .iter()
+            .any(|value| value == "mixed"));
+        assert!(
+            diagnose_schema["allOf"][1]["properties"]["result"]["properties"]
+                .get("authority_show")
                 .is_some()
         );
 

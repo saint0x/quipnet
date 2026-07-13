@@ -11,7 +11,8 @@ use daemonapi::{
     AuthoritySyncOriginPayload, AuthoritySyncResult, AuthoritySyncRevocationsOriginPayload,
     AuthoritySyncSnapshotPayload, AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus,
     DurableStateSummaryResult, DurableStateViolationEntry, ErrorCode, IdentityShowResult,
-    IdentityStatus, IdentityVerifyResult, RequestEnvelope, ResponseEnvelope, RuntimeEventEntry,
+    IdentityStatus, IdentityVerifyResult, RequestEnvelope, ResponseEnvelope,
+    RuntimeDiagnosePayload, RuntimeDiagnoseResult, RuntimeDiagnosisIssue, RuntimeEventEntry,
     RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
     RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry,
     RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary, SessionClosePayload,
@@ -761,6 +762,9 @@ fn route_control_request(
             runtime_status_response(args, control, transport, local_identity, envelope)
         }
         "runtime.sessions.list" => runtime_sessions_response(control, transport, envelope),
+        "runtime.diagnose" => {
+            runtime_diagnose_response(args, control, transport, local_identity, envelope)
+        }
         "runtime.listeners.list" => runtime_listeners_response(control, transport, envelope),
         "runtime.paths.list" => runtime_paths_response(control, transport, envelope),
         "runtime.health" => runtime_health_response(control, transport, envelope),
@@ -908,6 +912,36 @@ fn runtime_status_response(
     }
 }
 
+fn runtime_diagnose_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload = match serde_json::from_value::<RuntimeDiagnosePayload>(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid runtime.diagnose payload: {error}"),
+                None,
+            )
+        }
+    };
+    match runtime_diagnose_result(
+        args,
+        control,
+        transport,
+        local_identity,
+        payload.event_limit.unwrap_or(16),
+    ) {
+        Ok(result) => ResponseEnvelope::success(envelope.request_id, result),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
 fn runtime_sessions_response(
     control: &LocalControlPlane,
     transport: &QuicTransportAdapter,
@@ -918,14 +952,399 @@ fn runtime_sessions_response(
             envelope.request_id,
             RuntimeSessionsListResult {
                 truth_kind: "runtime".to_string(),
-                sessions: state
-                    .active_sessions()
-                    .iter()
-                    .map(runtime_session_entry)
+                sessions: runtime_session_inventory(&state, transport)
+                    .into_iter()
+                    .map(|session| runtime_session_entry(&session))
                     .collect(),
             },
         ),
         Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn runtime_session_inventory(
+    state: &fabric::DaemonState,
+    transport: &QuicTransportAdapter,
+) -> Vec<SessionSnapshot> {
+    let mut sessions = state.active_sessions().to_vec();
+    if let Ok(mut terminal) = transport.recent_terminal_sessions(16) {
+        sessions.append(&mut terminal);
+    }
+    sessions.sort_by(|left, right| {
+        right
+            .last_activity_unix_secs
+            .cmp(&left.last_activity_unix_secs)
+            .then_with(|| left.peer.to_string().cmp(&right.peer.to_string()))
+    });
+    sessions
+}
+
+fn runtime_diagnose_result(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    event_limit: usize,
+) -> Result<RuntimeDiagnoseResult, fabric::DaemonStateError> {
+    let state = control.sync_runtime_sessions(transport)?;
+    let status = runtime_status_result(args, control, transport, local_identity)?;
+    let health = runtime_health_result(control, transport)?;
+    let durable_state = state_show_result(args, control)?;
+    let identity = identity_verify_result(args, control, local_identity)?;
+    let authority_show = authority_show_result(args, control, transport)?;
+    let sessions = runtime_session_inventory(&state, transport)
+        .into_iter()
+        .map(|session| runtime_session_entry(&session))
+        .collect::<Vec<_>>();
+    let listeners = control
+        .runtime_listeners(transport)?
+        .into_iter()
+        .map(runtime_listener_entry)
+        .collect::<Vec<_>>();
+    let paths = control
+        .runtime_paths(transport)?
+        .into_iter()
+        .map(runtime_path_entry)
+        .collect::<Vec<_>>();
+    let events = control
+        .runtime_events(transport, event_limit.max(1))?
+        .into_iter()
+        .map(runtime_event_entry)
+        .collect::<Vec<_>>();
+    let issues = runtime_diagnosis_issues(
+        &status,
+        &health,
+        &durable_state,
+        &identity,
+        &sessions,
+        &paths,
+    );
+
+    Ok(RuntimeDiagnoseResult {
+        truth_kind: "runtime".to_string(),
+        primary_classification: runtime_primary_classification(&issues).to_string(),
+        issues,
+        status,
+        health,
+        state: durable_state,
+        identity,
+        authority_show,
+        sessions,
+        listeners,
+        paths,
+        events,
+    })
+}
+
+fn runtime_status_result(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+) -> Result<RuntimeStatusResult, fabric::DaemonStateError> {
+    let state = control.sync_runtime_sessions(transport)?;
+    let health = control.runtime_health(transport)?;
+    let authority = latest_authority_status(transport, &state, &health)?;
+    Ok(RuntimeStatusResult {
+        truth_kind: "runtime".to_string(),
+        daemon_health: runtime_health_level_label(&health.daemon_readiness).to_string(),
+        identity: IdentityStatus {
+            status: "loaded".to_string(),
+            path: args.identity_path.clone(),
+            node_id: local_identity.peer_id().to_string(),
+        },
+        durable_state: DurableStateStatus {
+            status: "loaded".to_string(),
+            path: args.state_path.clone(),
+            schema_version: state.schema_version,
+        },
+        authority,
+        runtime_summary: RuntimeSummary {
+            session_count: state.active_sessions().len(),
+            active_path_count: health.active_paths,
+            reconnect_state: runtime_reconnect_state_label(&health.reconnect_state).to_string(),
+        },
+    })
+}
+
+fn runtime_health_result(
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+) -> Result<RuntimeHealthResult, fabric::DaemonStateError> {
+    let health = control.runtime_health(transport)?;
+    Ok(RuntimeHealthResult {
+        truth_kind: "runtime".to_string(),
+        daemon_readiness: runtime_health_level_label(&health.daemon_readiness).to_string(),
+        authority_sync_health: runtime_health_level_label(&health.authority_sync_health)
+            .to_string(),
+        authority_subject_status: health.authority_subject_status,
+        authority_deny_reason: health.authority_deny_reason,
+        runtime_registry_health: runtime_health_level_label(&health.runtime_registry_health)
+            .to_string(),
+        path_manager_health: runtime_health_level_label(&health.path_manager_health).to_string(),
+        reconnect_subsystem_health: runtime_health_level_label(&health.reconnect_subsystem_health)
+            .to_string(),
+        active_sessions: health.active_sessions,
+        active_paths: health.active_paths,
+        active_listeners: health.active_listeners,
+        reconnect_state: runtime_reconnect_state_label(&health.reconnect_state).to_string(),
+        reconnect_attempt_count: health.reconnect_attempt_count,
+        reconnect_next_attempt_unix_secs: health.reconnect_next_attempt_unix_secs,
+        reconnect_suppression_count: health.reconnect_suppression_count,
+        runtime_event_buffer_depth: health.runtime_event_buffer_depth,
+    })
+}
+
+fn authority_show_result(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+) -> Result<AuthorityShowResult, fabric::DaemonStateError> {
+    let state = control.sync_runtime_sessions(transport)?;
+    let health = control.runtime_health(transport)?;
+    let authority = latest_authority_status(transport, &state, &health)?;
+    Ok(AuthorityShowResult {
+        truth_kind: "runtime".to_string(),
+        configured_origin: args.authority_origin.clone(),
+        configured_subject: args.authority_subject.clone(),
+        configured_snapshot: args.authority_snapshot.clone(),
+        network: state.network.clone(),
+        local_peer_id: state.local_peer_id.to_string(),
+        membership_subject_peer_id: state.membership.subject_peer_id.to_string(),
+        membership_issuer_peer_id: state.membership.issuer_peer_id.to_string(),
+        membership_roles: state.membership.roles.clone(),
+        grants: state.capability_grants.len(),
+        revocations: state.revocations.len(),
+        denied_peers: state.denied_peers.len(),
+        bootstrap_hints: state.bootstrap.len(),
+        relays: state.relay_count(),
+        schema_version: state.schema_version,
+        authority,
+    })
+}
+
+fn identity_verify_result(
+    args: &Args,
+    control: &LocalControlPlane,
+    local_identity: &IdentityKeypair,
+) -> Result<IdentityVerifyResult, fabric::DaemonStateError> {
+    let state = control.ensure_state()?;
+    let loaded_node_id = local_identity.peer_id().to_string();
+    let expected_node_id = state.local_peer_id.to_string();
+    let authority_subject_peer_id = state.membership.subject_peer_id.to_string();
+    let mut mismatch_reasons = Vec::new();
+    if loaded_node_id != expected_node_id {
+        mismatch_reasons.push(format!(
+            "durable state expects {} but daemon loaded {}",
+            expected_node_id, loaded_node_id
+        ));
+    }
+    if loaded_node_id != authority_subject_peer_id {
+        mismatch_reasons.push(format!(
+            "authority membership expects {} but daemon loaded {}",
+            authority_subject_peer_id, loaded_node_id
+        ));
+    }
+    Ok(IdentityVerifyResult {
+        truth_kind: "runtime_and_durable".to_string(),
+        identity_path: args.identity_path.clone(),
+        expected_node_id: Some(expected_node_id),
+        loaded_node_id,
+        authority_subject_peer_id: Some(authority_subject_peer_id),
+        match_result: if mismatch_reasons.is_empty() {
+            "match".to_string()
+        } else {
+            "mismatch".to_string()
+        },
+        mismatch_reasons,
+    })
+}
+
+fn state_show_result(
+    args: &Args,
+    control: &LocalControlPlane,
+) -> Result<StateShowResult, fabric::DaemonStateError> {
+    let report = control.inspect_state_file()?;
+    Ok(StateShowResult {
+        truth_kind: "durable".to_string(),
+        state_path: args.state_path.clone(),
+        present: report.present,
+        schema_version: report.schema_version,
+        valid: report.valid,
+        violations: report
+            .violations
+            .into_iter()
+            .map(durable_state_violation_entry)
+            .collect(),
+        summary: report.summary.map(durable_state_summary_result),
+    })
+}
+
+fn runtime_diagnosis_issues(
+    status: &RuntimeStatusResult,
+    health: &RuntimeHealthResult,
+    durable_state: &StateShowResult,
+    identity: &IdentityVerifyResult,
+    sessions: &[RuntimeSessionEntry],
+    paths: &[RuntimePathEntry],
+) -> Vec<RuntimeDiagnosisIssue> {
+    let mut issues = Vec::new();
+    if !durable_state.present {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "durable_state_missing".to_string(),
+            severity: "error".to_string(),
+            layer: "durable".to_string(),
+            summary: "durable network state file is missing".to_string(),
+        });
+    } else if !durable_state.valid {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "durable_state_invalid".to_string(),
+            severity: "error".to_string(),
+            layer: "durable".to_string(),
+            summary: "durable network state failed validation".to_string(),
+        });
+    }
+    if identity.match_result != "match" {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "identity_mismatch".to_string(),
+            severity: "error".to_string(),
+            layer: "durable".to_string(),
+            summary: format!("identity verification returned {}", identity.match_result),
+        });
+    }
+    if status.authority.authority_subject_mismatch {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "authority_subject_mismatch".to_string(),
+            severity: "error".to_string(),
+            layer: "authority".to_string(),
+            summary: "authority subject does not match the local runtime identity".to_string(),
+        });
+    }
+    if status.authority.local_policy_denied {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "authority_policy_denied".to_string(),
+            severity: "error".to_string(),
+            layer: "authority".to_string(),
+            summary: status
+                .authority
+                .local_policy_reason
+                .clone()
+                .unwrap_or_else(|| "authority policy denied local runtime behavior".to_string()),
+        });
+    } else if status.authority.sync_status != "in_sync" || status.authority.health != "ready" {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "authority_not_ready".to_string(),
+            severity: if status.authority.health == "failed" {
+                "error"
+            } else {
+                "warn"
+            }
+            .to_string(),
+            layer: "authority".to_string(),
+            summary: format!(
+                "authority reports sync_status={} health={}",
+                status.authority.sync_status, status.authority.health
+            ),
+        });
+    }
+    if health.daemon_readiness != "ready" {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "daemon_not_ready".to_string(),
+            severity: if health.daemon_readiness == "failed" {
+                "error"
+            } else {
+                "warn"
+            }
+            .to_string(),
+            layer: "runtime".to_string(),
+            summary: format!("daemon readiness is {}", health.daemon_readiness),
+        });
+    }
+    if health.reconnect_state == "suppressed" {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "reconnect_suppressed".to_string(),
+            severity: "warn".to_string(),
+            layer: "runtime".to_string(),
+            summary: format!(
+                "reconnect is suppressed with {} active suppression entries",
+                health.reconnect_suppression_count
+            ),
+        });
+    }
+    if health.reconnect_state == "failed" {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "reconnect_failed".to_string(),
+            severity: "error".to_string(),
+            layer: "runtime".to_string(),
+            summary: format!(
+                "reconnect has failed after {} tracked attempts",
+                health.reconnect_attempt_count
+            ),
+        });
+    }
+    if sessions.iter().any(|session| session.state == "failed") {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "failed_sessions_present".to_string(),
+            severity: "error".to_string(),
+            layer: "runtime".to_string(),
+            summary: "one or more runtime sessions are in failed state".to_string(),
+        });
+    }
+    if sessions.iter().any(|session| session.state == "degraded") {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "degraded_sessions_present".to_string(),
+            severity: "warn".to_string(),
+            layer: "runtime".to_string(),
+            summary: "one or more runtime sessions are degraded".to_string(),
+        });
+    }
+    if sessions.iter().any(|session| session.state == "closed") {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "recently_closed_sessions_present".to_string(),
+            severity: "warn".to_string(),
+            layer: "runtime".to_string(),
+            summary: "recently closed runtime sessions are present in terminal history".to_string(),
+        });
+    }
+    if sessions.iter().any(|session| session.state == "closing") {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "closing_sessions_present".to_string(),
+            severity: "warn".to_string(),
+            layer: "runtime".to_string(),
+            summary: "one or more runtime sessions are closing".to_string(),
+        });
+    }
+    if !sessions.is_empty() && health.active_paths == 0 {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "sessions_without_active_paths".to_string(),
+            severity: "error".to_string(),
+            layer: "runtime".to_string(),
+            summary: "runtime has sessions but no active paths".to_string(),
+        });
+    }
+    if paths.iter().any(|path| path.state == "failed") {
+        issues.push(RuntimeDiagnosisIssue {
+            code: "failed_paths_present".to_string(),
+            severity: "warn".to_string(),
+            layer: "runtime".to_string(),
+            summary: "one or more runtime paths are in failed state".to_string(),
+        });
+    }
+    issues
+}
+
+fn runtime_primary_classification(issues: &[RuntimeDiagnosisIssue]) -> &'static str {
+    if issues.is_empty() {
+        return "healthy";
+    }
+    let has_runtime = issues.iter().any(|issue| issue.layer == "runtime");
+    let has_authority = issues.iter().any(|issue| issue.layer == "authority");
+    let has_durable = issues.iter().any(|issue| issue.layer == "durable");
+    match (has_runtime, has_authority, has_durable) {
+        (true, false, false) => "runtime_only",
+        (false, true, false) => "authority_driven",
+        (false, false, true) => "durable_state_only",
+        _ => "mixed",
     }
 }
 
@@ -1634,15 +2053,32 @@ async fn session_close_response(
         }
     };
     match control.close_session(&session_id, transport).await {
-        Ok(()) => ResponseEnvelope::success(
-            envelope.request_id,
-            SessionCloseResult {
-                truth_kind: "runtime".to_string(),
-                closed_session_id: payload.session_id,
-                final_state: "closed".to_string(),
-                closure_reason: payload.reason.or(Some("operator_requested".to_string())),
-            },
-        ),
+        Ok(()) => {
+            let terminal = transport
+                .terminal_session_snapshot(&session_id)
+                .ok()
+                .flatten();
+            ResponseEnvelope::success(
+                envelope.request_id,
+                SessionCloseResult {
+                    truth_kind: "runtime".to_string(),
+                    closed_session_id: payload.session_id,
+                    final_state: terminal
+                        .as_ref()
+                        .map(|session| runtime_state_label(&session.state).to_string())
+                        .unwrap_or_else(|| "closed".to_string()),
+                    closure_reason: terminal
+                        .and_then(|session| {
+                            session
+                                .closure_reason
+                                .as_ref()
+                                .map(|reason| closure_reason_label(reason).to_string())
+                        })
+                        .or(payload.reason)
+                        .or(Some("operator_requested".to_string())),
+                },
+            )
+        }
         Err(error) => daemon_error_response(envelope.request_id, &error),
     }
 }
@@ -1826,6 +2262,18 @@ fn runtime_path_alternative_entry(
         relay_peer_id: alternative.relay_peer.map(|peer| peer.to_string()),
         score: alternative.score,
         summary: alternative.summary,
+    }
+}
+
+fn runtime_event_entry(event: fabric::RuntimeEvent) -> RuntimeEventEntry {
+    RuntimeEventEntry {
+        event_id: event.event_id,
+        event_type: event.event_type,
+        emitted_at: event.emitted_at,
+        truth_kind: event.truth_kind,
+        subject_kind: event.subject.kind,
+        subject_id: event.subject.id,
+        details: event.details,
     }
 }
 
@@ -2552,7 +3000,9 @@ fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition
 mod tests {
     use super::*;
     use daemonapi::{AuthoritySyncResult, RuntimeStatusResult};
-    use fabric::{KeyAlgorithm, PeerId};
+    use fabric::{
+        KeyAlgorithm, NetworkId, PathKind, PeerId, RoutePlan, RouteSource, SecureTransport,
+    };
     use quic::QuicTransportAdapter;
     use serde_json::json;
 
@@ -3192,6 +3642,134 @@ mod tests {
             .unwrap_or_default()
             .contains("reconnect exhausted 3/3 attempts"));
         assert!(failed_entry.decision_reason.is_some());
+
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn runtime_sessions_response_includes_recent_terminal_sessions() {
+        let local_identity = IdentityKeypair::from_secret_bytes([73_u8; 32]);
+        let local = local_identity.peer_id();
+        let transport = QuicTransportAdapter::with_identity(
+            NetworkId::derive("terminal-sessions"),
+            local_identity,
+        );
+        let session = transport
+            .connect(RoutePlan {
+                local_peer: local,
+                peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"terminal-sessions-peer"),
+                protocol: Some(
+                    ProtocolId::new("/quicnet/control/1").expect("protocol should parse"),
+                ),
+                class: TrafficClass::Interactive,
+                path_kind: PathKind::DirectUdp,
+                source: RouteSource::Observed,
+                remote_endpoints: vec!["quic://198.51.100.44:9443".to_string()],
+                relay: None,
+            })
+            .await
+            .expect("runtime session should connect")
+            .session;
+        let _ = transport
+            .update_session_state(
+                &session.session_id,
+                fabric::RuntimeSessionState::Closing,
+                Some(fabric::SessionClosureReason::OperatorRequested),
+                Some("operator requested close".to_string()),
+            )
+            .expect("runtime state should update");
+        transport
+            .close_session(&session)
+            .await
+            .expect("runtime session should close");
+
+        let state_path = unique_temp_path("quipd-runtime-terminal-sessions");
+        let mut state = fabric::fixture_daemon_state("quipd-runtime-terminal-sessions");
+        state.active_sessions.clear();
+        state
+            .save(&state_path)
+            .expect("fixture state should persist");
+        let control = LocalControlPlane::new(DaemonConfig::new(
+            "quipd-runtime-terminal-sessions",
+            &state_path,
+        ));
+        let response = runtime_sessions_response(
+            &control,
+            &transport,
+            RequestEnvelope {
+                request_id: "req-runtime-sessions".to_string(),
+                operation: "runtime.sessions.list".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: RuntimeSessionsListResult =
+            serde_json::from_value(response.result.expect("sessions result should exist"))
+                .expect("sessions result should deserialize");
+        assert!(result.sessions.iter().any(|entry| entry.state == "closed"
+            && entry.closure_reason.as_deref() == Some("operator_requested")));
+
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn runtime_diagnose_response_classifies_mixed_issues() {
+        let state_path = unique_temp_path("quipd-runtime-diagnose");
+        let local_identity = IdentityKeypair::from_secret_bytes([74_u8; 32]);
+        let mut state = fabric::fixture_daemon_state("quipd-runtime-diagnose");
+        state.local_peer_id = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"mismatched-peer");
+        state
+            .save(&state_path)
+            .expect("fixture state should persist");
+        let control =
+            LocalControlPlane::new(DaemonConfig::new("quipd-runtime-diagnose", &state_path));
+        let transport = QuicTransportAdapter::default();
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol should parse");
+        transport
+            .suppress_reconnect(
+                &PeerId::from_public_key(KeyAlgorithm::Ed25519, b"diagnose-peer"),
+                Some(&protocol),
+                TrafficClass::Interactive,
+                "policy denied reconnect".to_string(),
+            )
+            .expect("suppression should register");
+
+        let response = runtime_diagnose_response(
+            &test_args(state_path.to_string_lossy().as_ref()),
+            &control,
+            &transport,
+            &local_identity,
+            RequestEnvelope {
+                request_id: "req-runtime-diagnose".to_string(),
+                operation: "runtime.diagnose".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({ "event_limit": 4 }),
+            },
+        );
+
+        assert!(response.ok);
+        let result: RuntimeDiagnoseResult =
+            serde_json::from_value(response.result.expect("diagnose result should exist"))
+                .expect("diagnose result should deserialize");
+        assert_eq!(result.primary_classification, "mixed");
+        assert!(result
+            .issues
+            .iter()
+            .any(|issue| issue.layer == "durable" && issue.code == "identity_mismatch"));
+        assert!(result
+            .issues
+            .iter()
+            .any(|issue| issue.layer == "runtime" && issue.code == "reconnect_suppressed"));
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.event_type == "reconnect.suppressed"));
 
         let _ = std::fs::remove_file(state_path);
     }

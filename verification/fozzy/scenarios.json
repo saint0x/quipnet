@@ -124,6 +124,17 @@
       "focus": ["runtime_events", "reconnect", "operator_surface"]
     },
     {
+      "id": "runtime-diagnosis",
+      "priority": 1,
+      "description": "Runtime diagnosis classifies durable, authority, and runtime failures while preserving terminal session visibility.",
+      "checks": [
+        "mixed_issue_classification_visible",
+        "terminal_session_history_visible",
+        "runtime_contract_fixture_aligned"
+      ],
+      "focus": ["runtime_diagnose", "operator_surface", "terminal_history"]
+    },
+    {
       "id": "reconnect-after-drop",
       "priority": 1,
       "description": "Reconnect after drop follows daemon-owned policy with deterministic retry behavior.",

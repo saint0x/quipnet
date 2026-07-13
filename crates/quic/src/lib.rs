@@ -45,6 +45,8 @@ struct RuntimeReconnectRecord {
     snapshot: RuntimeReconnectAttempt,
 }
 
+const MAX_TERMINAL_SESSIONS: usize = 32;
+
 #[derive(Clone)]
 pub struct QuicTransportAdapter {
     pub implementation: &'static str,
@@ -55,6 +57,7 @@ pub struct QuicTransportAdapter {
     pub local_identity: Option<IdentityKeypair>,
     relay_control: Arc<dyn RelayControl>,
     runtime_sessions: Arc<RwLock<BTreeMap<[u8; 16], RuntimeSessionRecord>>>,
+    terminal_sessions: Arc<RwLock<VecDeque<RuntimeSessionRecord>>>,
     runtime_listeners: Arc<RwLock<BTreeMap<String, RuntimeListenerRecord>>>,
     runtime_events: Arc<RwLock<VecDeque<RuntimeEvent>>>,
     reconnect_suppressions: Arc<RwLock<Vec<ReconnectSuppression>>>,
@@ -72,6 +75,7 @@ impl Default for QuicTransportAdapter {
             local_identity: None,
             relay_control: Arc::new(HttpRelayControl),
             runtime_sessions: Arc::new(RwLock::new(BTreeMap::new())),
+            terminal_sessions: Arc::new(RwLock::new(VecDeque::new())),
             runtime_listeners: Arc::new(RwLock::new(BTreeMap::new())),
             runtime_events: Arc::new(RwLock::new(VecDeque::new())),
             reconnect_suppressions: Arc::new(RwLock::new(Vec::new())),
@@ -197,6 +201,34 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .expect("runtime session registry should remain readable")
             .get(session_id)
             .map(|record| record.snapshot.clone()))
+    }
+
+    fn terminal_session_snapshot(
+        &self,
+        session_id: &[u8; 16],
+    ) -> Result<Option<SessionSnapshot>, TransportError> {
+        Ok(self
+            .terminal_sessions
+            .read()
+            .expect("terminal session ledger should remain readable")
+            .iter()
+            .find(|record| &record.snapshot.session_id == session_id)
+            .map(|record| record.snapshot.clone()))
+    }
+
+    fn recent_terminal_sessions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SessionSnapshot>, TransportError> {
+        Ok(self
+            .terminal_sessions
+            .read()
+            .expect("terminal session ledger should remain readable")
+            .iter()
+            .rev()
+            .take(limit)
+            .map(|record| record.snapshot.clone())
+            .collect())
     }
 
     fn update_session_state(
@@ -653,11 +685,20 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
     }
 
     async fn close_session(&self, session: &SessionSnapshot) -> Result<(), TransportError> {
+        let existing = self.session_snapshot(&session.session_id)?;
+        let closure_reason = existing
+            .as_ref()
+            .and_then(|snapshot| snapshot.closure_reason.clone())
+            .or_else(|| session.closure_reason.clone());
+        let state_reason = existing
+            .as_ref()
+            .and_then(|snapshot| snapshot.state_reason.clone())
+            .or_else(|| session.state_reason.clone());
         let _ = self.update_session_state(
             &session.session_id,
             RuntimeSessionState::Closing,
-            session.closure_reason.clone(),
-            session.state_reason.clone(),
+            closure_reason,
+            state_reason,
         )?;
         let Some(active) = remove_runtime_session(self, &session.session_id)? else {
             return Ok(());
@@ -670,6 +711,16 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 session.transport_session_id,
             )?;
         }
+        let mut terminal = session.clone();
+        terminal.state = RuntimeSessionState::Closed;
+        terminal.last_activity_unix_secs = current_unix_secs();
+        record_terminal_session(
+            self,
+            RuntimeSessionRecord {
+                snapshot: terminal.clone(),
+                alpn_protocol: active.alpn_protocol,
+            },
+        )?;
         emit_runtime_event(
             self,
             "session.closed".to_string(),
@@ -681,8 +732,8 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 "peer_id": session.peer.to_string(),
                 "prior_state": runtime_session_state_label(&RuntimeSessionState::Closing),
                 "next_state": runtime_session_state_label(&RuntimeSessionState::Closed),
-                "closure_reason": session.closure_reason.as_ref().map(session_closure_reason_label),
-                "reason": session.state_reason
+                "closure_reason": terminal.closure_reason.as_ref().map(session_closure_reason_label),
+                "reason": terminal.state_reason
             }),
         );
         Ok(())
@@ -938,6 +989,22 @@ fn remove_runtime_session(
         .write()
         .expect("runtime session registry should remain writable")
         .remove(session_id))
+}
+
+fn record_terminal_session(
+    adapter: &QuicTransportAdapter,
+    record: RuntimeSessionRecord,
+) -> Result<(), TransportError> {
+    let mut terminal_sessions = adapter
+        .terminal_sessions
+        .write()
+        .expect("terminal session ledger should remain writable");
+    terminal_sessions.retain(|entry| entry.snapshot.session_id != record.snapshot.session_id);
+    terminal_sessions.push_back(record);
+    while terminal_sessions.len() > MAX_TERMINAL_SESSIONS {
+        terminal_sessions.pop_front();
+    }
+    Ok(())
 }
 
 fn upsert_runtime_listener(
@@ -1716,6 +1783,64 @@ mod tests {
 
         assert_eq!(registered_session_count(&relay), Some(0));
         assert!(!adapter.owns_session(&handle.session.session_id));
+    }
+
+    #[tokio::test]
+    async fn adapter_retains_closed_session_in_terminal_history() {
+        let local_identity = IdentityKeypair::from_secret_bytes([67_u8; 32]);
+        let local = local_identity.peer_id();
+        let adapter = QuicTransportAdapter::with_identity(
+            NetworkId::derive("terminal-history"),
+            local_identity,
+        );
+        let session = adapter
+            .connect(RoutePlan {
+                local_peer: local,
+                peer: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"terminal-history-peer"),
+                protocol: Some(ProtocolId::new("/quicnet/control/1").unwrap()),
+                class: TrafficClass::Interactive,
+                path_kind: PathKind::DirectUdp,
+                source: RouteSource::Observed,
+                remote_endpoints: vec!["quic://198.51.100.40:9443".to_string()],
+                relay: None,
+            })
+            .await
+            .expect("direct session should connect")
+            .session;
+
+        let _ = adapter
+            .update_session_state(
+                &session.session_id,
+                RuntimeSessionState::Closing,
+                Some(SessionClosureReason::OperatorRequested),
+                Some("operator requested close".to_string()),
+            )
+            .expect("terminal closure state should update");
+        adapter
+            .close_session(&session)
+            .await
+            .expect("session should close cleanly");
+
+        let terminal = adapter
+            .terminal_session_snapshot(&session.session_id)
+            .expect("terminal session lookup should succeed")
+            .expect("closed session should remain in terminal history");
+        assert_eq!(terminal.state, RuntimeSessionState::Closed);
+        assert_eq!(
+            terminal.closure_reason,
+            Some(SessionClosureReason::OperatorRequested)
+        );
+        assert_eq!(
+            terminal.state_reason.as_deref(),
+            Some("operator requested close")
+        );
+        let terminal_sessions = adapter
+            .recent_terminal_sessions(8)
+            .expect("terminal session history should load");
+        assert!(terminal_sessions
+            .iter()
+            .any(|entry| entry.session_id == session.session_id
+                && entry.state == RuntimeSessionState::Closed));
     }
 
     #[tokio::test]

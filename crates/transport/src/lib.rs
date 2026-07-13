@@ -224,6 +224,16 @@ pub trait SessionLifecycleTransport: SecureTransport {
         session_id: &[u8; 16],
     ) -> Result<Option<SessionSnapshot>, TransportError>;
 
+    fn terminal_session_snapshot(
+        &self,
+        session_id: &[u8; 16],
+    ) -> Result<Option<SessionSnapshot>, TransportError>;
+
+    fn recent_terminal_sessions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SessionSnapshot>, TransportError>;
+
     fn update_session_state(
         &self,
         session_id: &[u8; 16],

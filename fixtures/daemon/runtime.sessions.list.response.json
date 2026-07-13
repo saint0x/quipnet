@@ -1,0 +1,30 @@
+{
+  "ok": true,
+  "request_id": "req-runtime-sessions-1",
+  "result": {
+    "truth_kind": "runtime",
+    "sessions": [
+      {
+        "session_id": "9f10f8e8f34137b1eecce5e7ab9e843a",
+        "peer_id": "ed25519:active-peer",
+        "state": "active",
+        "closure_reason": null,
+        "state_reason": "direct session is healthy",
+        "active_path_class": "direct",
+        "age_seconds": 18,
+        "last_activity_seconds": 2
+      },
+      {
+        "session_id": "7aa9970bb08e2e17ba6304edb1ed74cc",
+        "peer_id": "ed25519:closed-peer",
+        "state": "closed",
+        "closure_reason": "operator_requested",
+        "state_reason": "operator requested close",
+        "active_path_class": "relay",
+        "age_seconds": 48,
+        "last_activity_seconds": 5
+      }
+    ]
+  },
+  "error": null
+}

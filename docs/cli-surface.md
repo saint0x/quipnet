@@ -46,6 +46,8 @@ Purpose:
 - inspect live runtime state in more detail
 
 Candidate subcommands:
+- `quip runtime target`
+- `quip runtime diagnose`
 - `quip runtime sessions`
 - `quip runtime listeners`
 - `quip runtime paths`
@@ -159,6 +161,8 @@ The production CLI should not preserve behaviors such as:
 
 Before this surface is complete, we need at least:
 - `quip status`
+- `quip runtime target`
+- `quip runtime diagnose`
 - `quip runtime sessions`
 - `quip session connect`
 - `quip session close`
@@ -167,6 +171,8 @@ Before this surface is complete, we need at least:
 - `quip authority show`
 - `quip authority sync`
 - `quip identity show`
+- `quip identity path`
+- `quip identity verify`
 - `quip state show`
 - `quip state validate`
 - `quip state backup`

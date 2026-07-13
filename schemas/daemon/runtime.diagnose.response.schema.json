@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quip.example/schemas/daemon/runtime.diagnose.response.schema.json",
+  "allOf": [
+    { "$ref": "./common.schema.json#/$defs/success_response" },
+    {
+      "properties": {
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "truth_kind",
+            "primary_classification",
+            "issues",
+            "status",
+            "health",
+            "state",
+            "identity",
+            "authority_show",
+            "sessions",
+            "listeners",
+            "paths",
+            "events"
+          ],
+          "properties": {
+            "truth_kind": { "const": "runtime" },
+            "primary_classification": {
+              "type": "string",
+              "enum": [
+                "healthy",
+                "runtime_only",
+                "authority_driven",
+                "durable_state_only",
+                "mixed"
+              ]
+            },
+            "issues": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code", "severity", "layer", "summary"],
+                "properties": {
+                  "code": { "type": "string", "minLength": 1 },
+                  "severity": { "type": "string", "enum": ["warn", "error"] },
+                  "layer": {
+                    "type": "string",
+                    "enum": ["runtime", "authority", "durable"]
+                  },
+                  "summary": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "status": { "type": "object" },
+            "health": { "type": "object" },
+            "state": { "type": "object" },
+            "identity": { "type": "object" },
+            "authority_show": { "type": "object" },
+            "sessions": { "type": "array" },
+            "listeners": { "type": "array" },
+            "paths": { "type": "array" },
+            "events": { "type": "array" }
+          }
+        }
+      }
+    }
+  ]
+}

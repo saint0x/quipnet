@@ -17,9 +17,7 @@
             "runtime_summary"
           ],
           "properties": {
-            "truth_kind": {
-              "$ref": "./common.schema.json#/$defs/truth_kind"
-            },
+            "truth_kind": { "const": "runtime" },
             "daemon_health": {
               "type": "string",
               "enum": ["ready", "degraded", "failed", "starting", "suppressed"]
@@ -53,15 +51,51 @@
             "authority": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["sync_status", "last_accepted_revision"],
+              "required": [
+                "sync_status",
+                "last_accepted_revision",
+                "health",
+                "local_policy_denied",
+                "authority_subject_mismatch",
+                "reevaluated_sessions",
+                "closed_sessions",
+                "degraded_sessions",
+                "migrated_sessions",
+                "unchanged_sessions",
+                "reevaluated_listeners",
+                "suppressed_listeners",
+                "restored_listeners",
+                "reconnect_suppressions_added",
+                "reconnect_suppressions_cleared",
+                "local_policy_reason"
+              ],
               "properties": {
                 "sync_status": {
                   "type": "string",
-                  "enum": ["in_sync", "syncing", "stale", "failed"]
+                  "enum": ["in_sync", "syncing", "stale", "failed", "policy_enforced", "subject_mismatch"]
                 },
                 "last_accepted_revision": {
                   "type": "string",
                   "minLength": 1
+                },
+                "health": {
+                  "type": "string",
+                  "enum": ["ready", "degraded", "failed", "suppressed"]
+                },
+                "local_policy_denied": { "type": "boolean" },
+                "authority_subject_mismatch": { "type": "boolean" },
+                "reevaluated_sessions": { "type": "integer", "minimum": 0 },
+                "closed_sessions": { "type": "integer", "minimum": 0 },
+                "degraded_sessions": { "type": "integer", "minimum": 0 },
+                "migrated_sessions": { "type": "integer", "minimum": 0 },
+                "unchanged_sessions": { "type": "integer", "minimum": 0 },
+                "reevaluated_listeners": { "type": "integer", "minimum": 0 },
+                "suppressed_listeners": { "type": "integer", "minimum": 0 },
+                "restored_listeners": { "type": "integer", "minimum": 0 },
+                "reconnect_suppressions_added": { "type": "integer", "minimum": 0 },
+                "reconnect_suppressions_cleared": { "type": "integer", "minimum": 0 },
+                "local_policy_reason": {
+                  "type": ["string", "null"]
                 }
               }
             },

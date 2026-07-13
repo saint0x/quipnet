@@ -42,6 +42,16 @@
       ]
     },
     {
+      "id": "trace-runtime-diagnosis",
+      "scenario": "runtime-diagnosis",
+      "required_steps": [
+        "record",
+        "trace_verify_strict",
+        "replay",
+        "ci_validate"
+      ]
+    },
+    {
       "id": "trace-relay-or-migration",
       "scenario": "relay-fallback",
       "alternates": ["path-migration"],
