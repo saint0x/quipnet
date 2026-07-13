@@ -1726,7 +1726,6 @@ impl LocalControlPlane {
     {
         let mut state = self.ensure_state()?;
         state.active_sessions = transport.active_sessions()?;
-        state.save(&self.config.state_path)?;
         Ok(state)
     }
 
@@ -1751,6 +1750,32 @@ impl LocalControlPlane {
         transport.close_session(&session).await?;
         state.active_sessions = transport.active_sessions()?;
         state.save(&self.config.state_path)?;
+        Ok(())
+    }
+
+    async fn fail_and_close_session<T>(
+        &self,
+        transport: &T,
+        session: &SessionSnapshot,
+        closure_reason: SessionClosureReason,
+        state_reason: String,
+    ) -> Result<(), DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let _ = transport.update_session_state(
+            &session.session_id,
+            RuntimeSessionState::Failed,
+            Some(closure_reason.clone()),
+            Some(state_reason.clone()),
+        )?;
+        record_path_failure_event(
+            transport,
+            session,
+            path_failure_cause(&closure_reason),
+            state_reason,
+        )?;
+        transport.close_session(session).await?;
         Ok(())
     }
 
@@ -1827,13 +1852,13 @@ impl LocalControlPlane {
                 continue;
             };
             let Some(protocol) = session.protocol.clone() else {
-                let _ = transport.update_session_state(
-                    &session.session_id,
-                    RuntimeSessionState::Closing,
-                    Some(SessionClosureReason::LocalRuntimeFailure),
-                    Some("session is missing negotiated protocol".to_string()),
-                )?;
-                transport.close_session(&session).await?;
+                self.fail_and_close_session(
+                    transport,
+                    &session,
+                    SessionClosureReason::LocalRuntimeFailure,
+                    "session is missing negotiated protocol".to_string(),
+                )
+                .await?;
                 state = state.without_session(&session.session_id);
                 closed += 1;
                 entries.push(SessionReconcileEntry {
@@ -1871,13 +1896,13 @@ impl LocalControlPlane {
             {
                 Ok(route) => route,
                 Err(DaemonStateError::NoRoute(_)) => {
-                    let _ = transport.update_session_state(
-                        &session.session_id,
-                        RuntimeSessionState::Closing,
-                        Some(SessionClosureReason::PathExhaustion),
-                        Some("no route is available for session".to_string()),
-                    )?;
-                    transport.close_session(&session).await?;
+                    self.fail_and_close_session(
+                        transport,
+                        &session,
+                        SessionClosureReason::PathExhaustion,
+                        "no route is available for session".to_string(),
+                    )
+                    .await?;
                     state = state.without_session(&session.session_id);
                     closed += 1;
                     entries.push(SessionReconcileEntry {
@@ -1917,7 +1942,28 @@ impl LocalControlPlane {
                 None,
                 Some("selected path changed; session migrating".to_string()),
             )?;
-            let migrated = transport.migrate(&session, route).await?;
+            let migrated = match transport.migrate(&session, route).await {
+                Ok(migrated) => migrated,
+                Err(error) => {
+                    self.fail_and_close_session(
+                        transport,
+                        &session,
+                        SessionClosureReason::LocalRuntimeFailure,
+                        format!("session migration failed: {error}"),
+                    )
+                    .await?;
+                    state = state.without_session(&session.session_id);
+                    closed += 1;
+                    entries.push(SessionReconcileEntry {
+                        session_id: session.session_id,
+                        peer: session.peer,
+                        disposition: SessionReconcileDisposition::Closed,
+                        reason: format!("session migration failed: {error}"),
+                        path_kind: None,
+                    });
+                    continue;
+                }
+            };
             state = state.with_active_session(migrated);
             upgraded += 1;
             entries.push(SessionReconcileEntry {
@@ -2105,6 +2151,40 @@ impl LocalControlPlane {
                     attempt.class,
                     selected_candidate,
                 ),
+            });
+        }
+
+        for session in transport.recent_terminal_sessions(16)? {
+            if snapshots.iter().any(|entry| {
+                entry.peer == session.peer
+                    && entry.protocol == session.protocol
+                    && entry.class == session.class
+            }) {
+                continue;
+            }
+            let candidates = state.path_candidates_for(&session.peer);
+            let selected = candidates
+                .iter()
+                .find(|candidate| runtime_candidate_matches_session(candidate, &session));
+            let alternatives = runtime_path_alternatives(&candidates, session.class, selected);
+            let explanation = selected.map(|candidate| candidate.explain(session.class));
+            snapshots.push(RuntimePathSnapshot {
+                session_id: Some(session.session_id),
+                peer: session.peer.clone(),
+                protocol: session.protocol.clone(),
+                class: session.class,
+                state: RuntimePathState::Failed,
+                path_kind: Some(session.path_kind),
+                source: selected
+                    .map(|candidate| candidate.source.clone())
+                    .or_else(|| route_source_to_path_source(&session.source)),
+                relay_peer: session.relay_peer.clone(),
+                endpoint_summary: runtime_session_endpoint_summary(&session),
+                state_reason: session.state_reason.clone(),
+                decision_reason: explanation.as_ref().map(runtime_path_decision_reason),
+                score: selected.map(|candidate| candidate.score(session.class)),
+                summary: runtime_terminal_path_summary(&session),
+                alternatives,
             });
         }
 
@@ -2354,13 +2434,20 @@ impl LocalControlPlane {
                 None
             };
             if let Some(enforced) = enforced {
+                let suppression_present = transport.reconnect_suppressions()?.iter().any(|entry| {
+                    entry.peer == session.peer
+                        && entry.protocol.as_ref() == Some(&protocol)
+                        && entry.class == session.class
+                });
                 transport.suppress_reconnect(
                     &session.peer,
                     Some(&protocol),
                     session.class,
                     enforced.reason.clone(),
                 )?;
-                reconnect_suppressions_added += 1;
+                if !suppression_present {
+                    reconnect_suppressions_added += 1;
+                }
                 match enforced.cause {
                     AuthorityPolicyCause::SubjectMismatch => {
                         subject_mismatch_sessions += 1;
@@ -2453,8 +2540,29 @@ impl LocalControlPlane {
                                         .to_string(),
                                 ),
                             )?;
-                            let _ = transport.migrate(&session, route).await?;
-                            migrated_sessions += 1;
+                            match transport.migrate(&session, route).await {
+                                Ok(_) => {
+                                    migrated_sessions += 1;
+                                }
+                                Err(error) => {
+                                    let reason =
+                                        format!("authority reevaluation migration failed: {error}");
+                                    self.fail_and_close_session(
+                                        transport,
+                                        &session,
+                                        SessionClosureReason::LocalRuntimeFailure,
+                                        reason.clone(),
+                                    )
+                                    .await?;
+                                    closed_sessions += 1;
+                                    transport.suppress_reconnect(
+                                        &session.peer,
+                                        Some(&protocol),
+                                        session.class,
+                                        reason,
+                                    )?;
+                                }
+                            }
                         } else {
                             let reason = "authority reevaluation selected a different eligible path but the active session cannot migrate".to_string();
                             let _ = transport.update_session_state(
@@ -2735,6 +2843,44 @@ fn session_matches_route(session: &SessionSnapshot, route: &RoutePlan) -> bool {
     }
 }
 
+fn path_failure_cause(reason: &SessionClosureReason) -> &'static str {
+    match reason {
+        SessionClosureReason::OperatorRequested => "operator_requested",
+        SessionClosureReason::LocalRuntimeFailure => "local_runtime_failure",
+        SessionClosureReason::RemoteFailure => "remote_failure",
+        SessionClosureReason::PolicyRejected => "policy_rejected",
+        SessionClosureReason::PathExhaustion => "path_exhaustion",
+        SessionClosureReason::DaemonShutdown => "daemon_shutdown",
+    }
+}
+
+fn record_path_failure_event<T>(
+    transport: &T,
+    session: &SessionSnapshot,
+    cause: &str,
+    reason: String,
+) -> Result<(), DaemonStateError>
+where
+    T: SessionLifecycleTransport,
+{
+    transport.record_runtime_event(
+        "path.failed",
+        RuntimeEventSubject {
+            kind: "session".to_string(),
+            id: hex_session_id(&session.session_id),
+        },
+        json!({
+            "peer_id": session.peer.to_string(),
+            "protocol": session.protocol.as_ref().map(|protocol| protocol.as_str()),
+            "class": format!("{:?}", session.class),
+            "path_class": format!("{:?}", session.path_kind),
+            "cause": cause,
+            "reason": reason
+        }),
+    )?;
+    Ok(())
+}
+
 fn bootstrap_protocols(metadata: &BTreeMap<String, String>) -> Vec<String> {
     metadata
         .get("protocols")
@@ -2964,6 +3110,41 @@ fn runtime_session_summary(session: &SessionSnapshot) -> String {
         session.peer,
         runtime_session_endpoint_summary(session)
     )
+}
+
+fn runtime_terminal_path_summary(session: &SessionSnapshot) -> String {
+    let outcome = match session.state {
+        RuntimeSessionState::Closed => "closed",
+        RuntimeSessionState::Failed => "failed",
+        _ => "terminal",
+    };
+    let reason = session
+        .state_reason
+        .as_deref()
+        .or_else(|| {
+            session
+                .closure_reason
+                .as_ref()
+                .map(session_closure_reason_phrase)
+        })
+        .unwrap_or("runtime session is no longer active");
+    format!(
+        "{outcome} path for {} is {} because {}",
+        session.peer,
+        runtime_session_endpoint_summary(session),
+        reason
+    )
+}
+
+fn session_closure_reason_phrase(reason: &SessionClosureReason) -> &'static str {
+    match reason {
+        SessionClosureReason::OperatorRequested => "operator requested closure",
+        SessionClosureReason::LocalRuntimeFailure => "the local runtime failed",
+        SessionClosureReason::RemoteFailure => "the remote peer failed",
+        SessionClosureReason::PolicyRejected => "authority or policy rejected the session",
+        SessionClosureReason::PathExhaustion => "no eligible path remained",
+        SessionClosureReason::DaemonShutdown => "the daemon shut down",
+    }
 }
 
 fn runtime_reconnect_path_status(

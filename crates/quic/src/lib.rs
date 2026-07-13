@@ -558,6 +558,24 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
                 "reason": snapshot.reason
             }),
         );
+        if snapshot.state == RuntimeReconnectAttemptState::Failed {
+            emit_runtime_event(
+                self,
+                "path.failed".to_string(),
+                RuntimeEventSubject {
+                    kind: "peer".to_string(),
+                    id: peer.to_string(),
+                },
+                json!({
+                    "protocol": protocol.map(|protocol| protocol.as_str()),
+                    "class": class_label(class),
+                    "cause": "reconnect_exhausted",
+                    "attempt_count": snapshot.attempt_count,
+                    "max_attempts": snapshot.max_attempts,
+                    "reason": snapshot.reason
+                }),
+            );
+        }
         Ok(snapshot)
     }
 
