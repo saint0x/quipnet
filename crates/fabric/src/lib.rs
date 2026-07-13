@@ -69,6 +69,10 @@ pub enum DaemonStateError {
     PolicyDenied(String),
     #[error("transport execution failed: {0}")]
     Transport(#[from] transport::TransportError),
+    #[error("session {0} was not found")]
+    SessionNotFound(String),
+    #[error("session state is invalid: {0}")]
+    InvalidSession(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,6 +116,31 @@ pub struct StateSyncReport {
     pub revocations_added: usize,
     pub bootstrap_hints_added: usize,
     pub relay_announcements_added: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionReconcileDisposition {
+    Unchanged,
+    Upgraded,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionReconcileEntry {
+    pub session_id: [u8; 16],
+    pub peer: PeerId,
+    pub disposition: SessionReconcileDisposition,
+    pub reason: String,
+    pub path_kind: Option<PathKind>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionReconcileReport {
+    pub examined: usize,
+    pub unchanged: usize,
+    pub upgraded: usize,
+    pub closed: usize,
+    pub entries: Vec<SessionReconcileEntry>,
 }
 
 impl DaemonState {
@@ -163,6 +192,12 @@ impl DaemonState {
 
     pub fn active_sessions(&self) -> &[SessionSnapshot] {
         &self.active_sessions
+    }
+
+    pub fn session(&self, session_id: &[u8; 16]) -> Option<&SessionSnapshot> {
+        self.active_sessions
+            .iter()
+            .find(|session| &session.session_id == session_id)
     }
 
     pub fn grants_for_peer(&self, peer: &PeerId) -> Vec<CapabilityGrant> {
@@ -367,6 +402,14 @@ impl DaemonState {
         } else {
             state.active_sessions.push(session);
         }
+        state
+    }
+
+    pub fn without_session(&self, session_id: &[u8; 16]) -> Self {
+        let mut state = self.clone();
+        state
+            .active_sessions
+            .retain(|session| &session.session_id != session_id);
         state
     }
 
@@ -813,6 +856,150 @@ impl LocalControlPlane {
         Ok(self.ensure_state()?.active_sessions.clone())
     }
 
+    pub async fn close_session<T>(
+        &self,
+        session_id: &[u8; 16],
+        transport: &T,
+    ) -> Result<(), DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let state = self.ensure_state()?;
+        let session = state
+            .session(session_id)
+            .cloned()
+            .ok_or_else(|| DaemonStateError::SessionNotFound(hex_session_id(session_id)))?;
+        transport.close_session(&session).await?;
+        let state = state.without_session(session_id);
+        state.save(&self.config.state_path)?;
+        Ok(())
+    }
+
+    pub async fn upgrade_session<T>(
+        &self,
+        session_id: &[u8; 16],
+        transport: &T,
+    ) -> Result<SessionSnapshot, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let state = self.ensure_state()?;
+        let session = state
+            .session(session_id)
+            .cloned()
+            .ok_or_else(|| DaemonStateError::SessionNotFound(hex_session_id(session_id)))?;
+        let protocol = session.protocol.clone().ok_or_else(|| {
+            DaemonStateError::InvalidSession("session has no negotiated protocol".to_string())
+        })?;
+        let policy = state.explain_policy(&session.peer, &protocol);
+        if !policy.allowed {
+            return Err(DaemonStateError::PolicyDenied(policy.reason));
+        }
+        let route = state.route_plan(&session.peer, Some(protocol), session.class)?;
+        let upgraded = transport.migrate(&session, route).await?;
+        let state = state.with_active_session(upgraded.clone());
+        state.save(&self.config.state_path)?;
+        Ok(upgraded)
+    }
+
+    pub async fn reconcile_sessions<T>(
+        &self,
+        transport: &T,
+    ) -> Result<SessionReconcileReport, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let mut state = self.ensure_state()?;
+        let sessions = state.active_sessions.clone();
+        let mut entries = Vec::with_capacity(sessions.len());
+        let mut unchanged = 0;
+        let mut upgraded = 0;
+        let mut closed = 0;
+
+        for session in sessions {
+            let Some(protocol) = session.protocol.clone() else {
+                transport.close_session(&session).await?;
+                state = state.without_session(&session.session_id);
+                closed += 1;
+                entries.push(SessionReconcileEntry {
+                    session_id: session.session_id,
+                    peer: session.peer,
+                    disposition: SessionReconcileDisposition::Closed,
+                    reason: "session is missing negotiated protocol".to_string(),
+                    path_kind: None,
+                });
+                continue;
+            };
+
+            let policy = state.explain_policy(&session.peer, &protocol);
+            if !policy.allowed {
+                transport.close_session(&session).await?;
+                state = state.without_session(&session.session_id);
+                closed += 1;
+                entries.push(SessionReconcileEntry {
+                    session_id: session.session_id,
+                    peer: session.peer,
+                    disposition: SessionReconcileDisposition::Closed,
+                    reason: format!("policy denied session: {}", policy.reason),
+                    path_kind: None,
+                });
+                continue;
+            }
+
+            let route = match state.route_plan(&session.peer, Some(protocol.clone()), session.class)
+            {
+                Ok(route) => route,
+                Err(DaemonStateError::NoRoute(_)) => {
+                    transport.close_session(&session).await?;
+                    state = state.without_session(&session.session_id);
+                    closed += 1;
+                    entries.push(SessionReconcileEntry {
+                        session_id: session.session_id,
+                        peer: session.peer,
+                        disposition: SessionReconcileDisposition::Closed,
+                        reason: "no route is available for session".to_string(),
+                        path_kind: None,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+
+            if session_matches_route(&session, &route) {
+                unchanged += 1;
+                entries.push(SessionReconcileEntry {
+                    session_id: session.session_id,
+                    peer: session.peer,
+                    disposition: SessionReconcileDisposition::Unchanged,
+                    reason: "selected path still matches active session".to_string(),
+                    path_kind: Some(session.path_kind),
+                });
+                continue;
+            }
+
+            let next_path_kind = route.path_kind;
+            let migrated = transport.migrate(&session, route).await?;
+            state = state.with_active_session(migrated);
+            upgraded += 1;
+            entries.push(SessionReconcileEntry {
+                session_id: session.session_id,
+                peer: session.peer,
+                disposition: SessionReconcileDisposition::Upgraded,
+                reason: "selected path changed; session migrated".to_string(),
+                path_kind: Some(next_path_kind),
+            });
+        }
+
+        state.save(&self.config.state_path)?;
+        Ok(SessionReconcileReport {
+            examined: entries.len(),
+            unchanged,
+            upgraded,
+            closed,
+            entries,
+        })
+    }
+
     pub async fn realize_best_path<T>(
         &self,
         peer: &PeerId,
@@ -856,6 +1043,40 @@ fn load_authority_snapshot(
 
 fn authority_client(network: &str, origin: &str) -> ControlClient {
     ControlClient::from_origin(NetworkId::derive(network), origin)
+}
+
+fn hex_session_id(session_id: &[u8; 16]) -> String {
+    session_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
+fn session_matches_route(session: &SessionSnapshot, route: &RoutePlan) -> bool {
+    if session.path_kind != route.path_kind || session.class != route.class {
+        return false;
+    }
+    if session.protocol != route.protocol {
+        return false;
+    }
+
+    let Some(remote_endpoint) = route.remote_endpoints.first() else {
+        return false;
+    };
+    if session.remote_endpoint != *remote_endpoint {
+        return false;
+    }
+
+    match (&session.relay_peer, &route.relay) {
+        (None, None) => true,
+        (Some(peer), Some(relay)) => {
+            session.relay_control_endpoint.as_deref() == Some(relay.relay_control_endpoint.as_str())
+                && peer == &relay.relay_peer
+                && session.relay_endpoint.as_deref()
+                    == relay.relay_endpoints.first().map(String::as_str)
+        }
+        _ => false,
+    }
 }
 
 fn bootstrap_protocols(metadata: &BTreeMap<String, String>) -> Vec<String> {
@@ -1152,7 +1373,9 @@ fn endpoint_matches_path_kind(address: &str, path_kind: PathKind) -> bool {
         PathKind::DirectUdp => is_direct_quic_address(address) && !is_ipv6_address(address),
         PathKind::Relay => is_direct_quic_address(address),
         PathKind::Loopback => address.contains("127.0.0.1") || address.contains("://[::1]"),
-        PathKind::Lan => address.contains("192.168.") || address.contains("10.") || address.contains("172.16."),
+        PathKind::Lan => {
+            address.contains("192.168.") || address.contains("10.") || address.contains("172.16.")
+        }
     }
 }
 
@@ -1340,16 +1563,217 @@ impl DaemonState {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use control::AuthorityArtifactSnapshot;
     use quic::QuicTransportAdapter;
     use relay::{
-        clear_registry, register_relay, InProcessRelayControl, RelayNode, RelayQuota, RelayService,
+        clear_registry, register_relay, registered_session_count, InProcessRelayControl, RelayNode,
+        RelayQuota, RelayService,
     };
 
     use super::*;
+
+    fn unique_state_path(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{suffix}.json"))
+    }
+
+    fn relay_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("relay test lock")
+    }
+
+    async fn establish_persisted_relay_session(
+        network: &str,
+        state_path: &Path,
+        authority_seed: u8,
+        subject_seed: u8,
+        relay_label: &'static [u8],
+        bootstrap_label: &'static [u8],
+    ) -> (
+        LocalControlPlane,
+        QuicTransportAdapter,
+        SessionSnapshot,
+        PeerId,
+    ) {
+        clear_registry();
+        let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, relay_label);
+        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, bootstrap_label);
+        let authority = crypto::IdentityKeypair::from_secret_bytes([authority_seed; 32]);
+        let subject = crypto::IdentityKeypair::from_secret_bytes([subject_seed; 32]);
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let snapshot = AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(network),
+            enrollment_token: None,
+            membership: Some(membership::MembershipCertificate::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                100,
+                200,
+                vec!["member".to_string()],
+            )),
+            capability_grants: vec![membership::CapabilityGrant::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                vec!["control.access".to_string()],
+                vec![protocol.clone()],
+                membership::ResourceLimits::default(),
+                vec![],
+                100,
+                200,
+                7,
+            )],
+            revocations: vec![],
+            bootstrap_hints: vec![membership::BootstrapHint {
+                peer_id: Some(bootstrap_peer.clone()),
+                addresses: vec!["quic://198.51.100.77:8443".to_string()],
+                metadata: BTreeMap::from([(
+                    "protocols".to_string(),
+                    "/quicnet/control/1".to_string(),
+                )]),
+            }],
+        };
+        let mut state =
+            DaemonState::from_authority_snapshot(network, vec![DaemonRole::Edge], snapshot)
+                .expect("state should build from snapshot");
+        state.netcheck.udp_reachable = false;
+        state.netcheck.ipv6_reachable = false;
+        let relay_map = RelayMap {
+            version: 1,
+            generated_at: 1_720_555_000,
+            relays: vec![RelayAnnouncement {
+                peer_id: relay_peer.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.70:443".to_string()],
+                control_endpoint: format!("inproc://{relay_peer}"),
+                max_bandwidth_bps: 2_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
+            }],
+        };
+        let (state, _) = state.apply_relay_map(relay_map);
+        state.save(state_path).expect("state should persist");
+        register_relay(RelayService::new(RelayNode {
+            announcement: RelayAnnouncement {
+                peer_id: relay_peer.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.70:443".to_string()],
+                control_endpoint: format!("inproc://{relay_peer}"),
+                max_bandwidth_bps: 2_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
+            },
+            quotas: vec![RelayQuota {
+                peer: subject.peer_id(),
+                max_bandwidth_bps: 100_000_000,
+                max_concurrent_sessions: 2,
+            }],
+            destinations: vec![relay::RelayDestination {
+                peer: bootstrap_peer.clone(),
+                protocols: vec![protocol.clone()],
+            }],
+        }));
+        let control = LocalControlPlane::new(DaemonConfig::new(network, state_path));
+        let transport =
+            QuicTransportAdapter::with_identity(NetworkId::derive(network), subject.clone())
+                .with_relay_control(Arc::new(InProcessRelayControl));
+        let session = control
+            .realize_best_path(
+                &bootstrap_peer,
+                &protocol,
+                TrafficClass::Control,
+                &transport,
+            )
+            .await
+            .expect("relay session should be accepted");
+
+        (control, transport, session, relay_peer)
+    }
+
+    async fn establish_persisted_direct_session(
+        network: &str,
+        state_path: &Path,
+        authority_seed: u8,
+        subject_seed: u8,
+        bootstrap_label: &'static [u8],
+    ) -> (
+        LocalControlPlane,
+        QuicTransportAdapter,
+        SessionSnapshot,
+        PeerId,
+    ) {
+        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, bootstrap_label);
+        let authority = crypto::IdentityKeypair::from_secret_bytes([authority_seed; 32]);
+        let subject = crypto::IdentityKeypair::from_secret_bytes([subject_seed; 32]);
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let snapshot = AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(network),
+            enrollment_token: None,
+            membership: Some(membership::MembershipCertificate::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                100,
+                200,
+                vec!["member".to_string()],
+            )),
+            capability_grants: vec![membership::CapabilityGrant::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                vec!["control.access".to_string()],
+                vec![protocol.clone()],
+                membership::ResourceLimits::default(),
+                vec![],
+                100,
+                200,
+                7,
+            )],
+            revocations: vec![],
+            bootstrap_hints: vec![membership::BootstrapHint {
+                peer_id: Some(bootstrap_peer.clone()),
+                addresses: vec!["quic://198.51.100.77:8443".to_string()],
+                metadata: BTreeMap::from([(
+                    "protocols".to_string(),
+                    "/quicnet/control/1".to_string(),
+                )]),
+            }],
+        };
+        let mut state =
+            DaemonState::from_authority_snapshot(network, vec![DaemonRole::Edge], snapshot)
+                .expect("state should build from snapshot");
+        state.netcheck.udp_reachable = true;
+        state.netcheck.ipv6_reachable = false;
+        state.netcheck.public_udp_addr = Some("203.0.113.60:8443".to_string());
+        state.save(state_path).expect("state should persist");
+        let control = LocalControlPlane::new(DaemonConfig::new(network, state_path));
+        let transport =
+            QuicTransportAdapter::with_identity(NetworkId::derive(network), subject.clone());
+        let session = control
+            .realize_best_path(
+                &bootstrap_peer,
+                &protocol,
+                TrafficClass::Control,
+                &transport,
+            )
+            .await
+            .expect("direct session should be accepted");
+
+        (control, transport, session, bootstrap_peer)
+    }
 
     #[test]
     fn fixture_state_exposes_best_path() {
@@ -1739,10 +2163,7 @@ mod tests {
                 max_bandwidth_bps: 2_000_000_000,
                 supports_quic_datagrams: true,
                 supports_path_migration: true,
-                traffic_classes: vec![
-                    "NetworkControl".to_string(),
-                    "InteractiveRpc".to_string(),
-                ],
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
             }],
         };
 
@@ -1810,10 +2231,7 @@ mod tests {
                 max_bandwidth_bps: 2_000_000_000,
                 supports_quic_datagrams: true,
                 supports_path_migration: true,
-                traffic_classes: vec![
-                    "NetworkControl".to_string(),
-                    "InteractiveRpc".to_string(),
-                ],
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
             }],
         };
         let (state, _) = state.apply_relay_map(relay_map);
@@ -1829,19 +2247,27 @@ mod tests {
         assert_eq!(route.path_kind, PathKind::Relay);
         let relay = route.relay.expect("relay plan should exist");
         assert_eq!(relay.relay_peer, relay_peer);
-        assert_eq!(relay.destination_endpoints, vec!["quic://198.51.100.77:8443".to_string()]);
-        assert_eq!(relay.relay_endpoints, vec!["quic://203.0.113.70:443".to_string()]);
+        assert_eq!(
+            relay.destination_endpoints,
+            vec!["quic://198.51.100.77:8443".to_string()]
+        );
+        assert_eq!(
+            relay.relay_endpoints,
+            vec!["quic://203.0.113.70:443".to_string()]
+        );
     }
 
     #[tokio::test]
     async fn realize_best_path_persists_accepted_relay_session() {
+        let _guard = relay_test_lock();
         clear_registry();
         let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-runtime");
-        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-target-runtime");
+        let bootstrap_peer =
+            PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-target-runtime");
         let authority = crypto::IdentityKeypair::from_secret_bytes([41_u8; 32]);
         let subject = crypto::IdentityKeypair::from_secret_bytes([42_u8; 32]);
         let network = "relay-runtime-prod";
-        let state_path = std::env::temp_dir().join("quicnet-relay-runtime-state.json");
+        let state_path = unique_state_path("quicnet-relay-runtime-state");
         let snapshot = AuthorityArtifactSnapshot {
             network_id: NetworkId::derive(network),
             enrollment_token: None,
@@ -1891,10 +2317,7 @@ mod tests {
                 max_bandwidth_bps: 2_000_000_000,
                 supports_quic_datagrams: true,
                 supports_path_migration: true,
-                traffic_classes: vec![
-                    "NetworkControl".to_string(),
-                    "InteractiveRpc".to_string(),
-                ],
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
             }],
         };
         let (state, _) = state.apply_relay_map(relay_map);
@@ -1908,10 +2331,7 @@ mod tests {
                 max_bandwidth_bps: 2_000_000_000,
                 supports_quic_datagrams: true,
                 supports_path_migration: true,
-                traffic_classes: vec![
-                    "NetworkControl".to_string(),
-                    "InteractiveRpc".to_string(),
-                ],
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
             },
             quotas: vec![RelayQuota {
                 peer: subject.peer_id(),
@@ -1924,8 +2344,9 @@ mod tests {
             }],
         }));
         let control = LocalControlPlane::new(DaemonConfig::new(network, &state_path));
-        let transport = QuicTransportAdapter::with_identity(NetworkId::derive(network), subject.clone())
-            .with_relay_control(Arc::new(InProcessRelayControl));
+        let transport =
+            QuicTransportAdapter::with_identity(NetworkId::derive(network), subject.clone())
+                .with_relay_control(Arc::new(InProcessRelayControl));
 
         let session = control
             .realize_best_path(
@@ -1943,5 +2364,216 @@ mod tests {
         assert_eq!(persisted.active_sessions.len(), 1);
         assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
         let _ = std::fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn close_session_removes_persisted_relay_session_and_releases_registry() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-relay-close-state");
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "relay-close-prod",
+            &state_path,
+            51,
+            52,
+            b"relay-close-runtime",
+            b"relay-close-target",
+        )
+        .await;
+
+        assert_eq!(registered_session_count(&relay_peer), Some(1));
+
+        control
+            .close_session(&session.session_id, &transport)
+            .await
+            .expect("relay session should close cleanly");
+
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert!(persisted.active_sessions.is_empty());
+        assert!(persisted.session(&session.session_id).is_none());
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn reconcile_sessions_leaves_matching_direct_session_unchanged() {
+        let state_path = unique_state_path("quicnet-direct-reconcile-state");
+        let (control, transport, session, bootstrap_peer) = establish_persisted_direct_session(
+            "direct-reconcile-prod",
+            &state_path,
+            71,
+            72,
+            b"direct-reconcile-target",
+        )
+        .await;
+
+        let report = control
+            .reconcile_sessions(&transport)
+            .await
+            .expect("direct session should reconcile cleanly");
+
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert_eq!(report.examined, 1);
+        assert_eq!(report.unchanged, 1);
+        assert_eq!(report.upgraded, 0);
+        assert_eq!(report.closed, 0);
+        assert_eq!(report.entries[0].session_id, session.session_id);
+        assert_eq!(
+            report.entries[0].disposition,
+            SessionReconcileDisposition::Unchanged
+        );
+        assert_eq!(report.entries[0].path_kind, Some(PathKind::DirectUdp));
+        assert_eq!(persisted.active_sessions.len(), 1);
+        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
+        assert_eq!(persisted.active_sessions[0].peer, bootstrap_peer);
+
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn upgrade_session_persists_direct_path_and_releases_relay_registry() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-relay-upgrade-state");
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "relay-upgrade-prod",
+            &state_path,
+            61,
+            62,
+            b"relay-upgrade-runtime",
+            b"relay-upgrade-target",
+        )
+        .await;
+
+        assert_eq!(session.path_kind, PathKind::Relay);
+        assert_eq!(registered_session_count(&relay_peer), Some(1));
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.netcheck.udp_reachable = true;
+        updated.netcheck.ipv6_reachable = false;
+        updated.netcheck.public_udp_addr = Some("203.0.113.52:8443".to_string());
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let upgraded = control
+            .upgrade_session(&session.session_id, &transport)
+            .await
+            .expect("relay session should migrate to the direct path");
+
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert_eq!(upgraded.session_id, session.session_id);
+        assert!(matches!(
+            upgraded.path_kind,
+            PathKind::DirectUdp | PathKind::DirectIpv6
+        ));
+        assert_eq!(upgraded.relay_peer, None);
+        assert_eq!(upgraded.relay_control_endpoint, None);
+        assert_eq!(persisted.active_sessions.len(), 1);
+        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
+        assert_eq!(persisted.active_sessions[0].path_kind, upgraded.path_kind);
+        assert_eq!(persisted.active_sessions[0].relay_peer, None);
+        assert_eq!(persisted.active_sessions[0].relay_control_endpoint, None);
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn reconcile_sessions_upgrades_relay_session_to_direct() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-relay-reconcile-upgrade-state");
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "relay-reconcile-upgrade-prod",
+            &state_path,
+            81,
+            82,
+            b"relay-reconcile-upgrade-runtime",
+            b"relay-reconcile-upgrade-target",
+        )
+        .await;
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.netcheck.udp_reachable = true;
+        updated.netcheck.ipv6_reachable = false;
+        updated.netcheck.public_udp_addr = Some("203.0.113.82:8443".to_string());
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let report = control
+            .reconcile_sessions(&transport)
+            .await
+            .expect("relay session should reconcile to a direct path");
+
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert_eq!(report.examined, 1);
+        assert_eq!(report.unchanged, 0);
+        assert_eq!(report.upgraded, 1);
+        assert_eq!(report.closed, 0);
+        assert_eq!(report.entries[0].session_id, session.session_id);
+        assert_eq!(
+            report.entries[0].disposition,
+            SessionReconcileDisposition::Upgraded
+        );
+        assert!(matches!(
+            report.entries[0].path_kind,
+            Some(PathKind::DirectUdp | PathKind::DirectIpv6)
+        ));
+        assert_eq!(persisted.active_sessions.len(), 1);
+        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
+        assert!(matches!(
+            persisted.active_sessions[0].path_kind,
+            PathKind::DirectUdp | PathKind::DirectIpv6
+        ));
+        assert_eq!(persisted.active_sessions[0].relay_peer, None);
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn reconcile_sessions_closes_policy_denied_session() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-relay-reconcile-close-state");
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "relay-reconcile-close-prod",
+            &state_path,
+            91,
+            92,
+            b"relay-reconcile-close-runtime",
+            b"relay-reconcile-close-target",
+        )
+        .await;
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.capability_grants.clear();
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let report = control
+            .reconcile_sessions(&transport)
+            .await
+            .expect("policy denied session should reconcile by closing");
+
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert_eq!(report.examined, 1);
+        assert_eq!(report.unchanged, 0);
+        assert_eq!(report.upgraded, 0);
+        assert_eq!(report.closed, 1);
+        assert_eq!(report.entries[0].session_id, session.session_id);
+        assert_eq!(
+            report.entries[0].disposition,
+            SessionReconcileDisposition::Closed
+        );
+        assert!(report.entries[0].reason.contains("policy denied session"));
+        assert!(persisted.active_sessions.is_empty());
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
     }
 }

@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use crypto::{IdentityKeypair, SessionKeypair};
-use model::{NetworkId, PeerId};
+use model::NetworkId;
 use rand::{rngs::OsRng, RngCore};
 use relay::{HttpRelayControl, RelayControl};
 use relaywire::RelayOpenRequest;
 use transport::{
-    BindSpec, ConnectionHandle, RelayPlan, RoutePlan, SecureTransport, SessionSnapshot,
-    TransportError,
+    BindSpec, ConnectionHandle, RelayPlan, RoutePlan, SecureTransport, SessionLifecycleTransport,
+    SessionSnapshot, TransportError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +82,47 @@ impl SecureTransport for QuicTransportAdapter {
     }
 }
 
+#[async_trait]
+impl SessionLifecycleTransport for QuicTransportAdapter {
+    async fn migrate(
+        &self,
+        session: &SessionSnapshot,
+        route: RoutePlan,
+    ) -> Result<SessionSnapshot, TransportError> {
+        let mut migrated = session_snapshot_for_route(self, &route)?;
+        let previous_transport_session_id = session.transport_session_id;
+        let previous_control_endpoint = session.relay_control_endpoint.clone();
+        let previous_path_kind = session.path_kind;
+
+        migrated.session_id = session.session_id;
+
+        if previous_path_kind == model::PathKind::Relay
+            && (migrated.path_kind != model::PathKind::Relay
+                || migrated.transport_session_id != previous_transport_session_id
+                || migrated.relay_control_endpoint != previous_control_endpoint)
+        {
+            close_relay_transport_session(
+                &*self.relay_control,
+                previous_control_endpoint.as_deref(),
+                previous_transport_session_id,
+            )?;
+        }
+
+        Ok(migrated)
+    }
+
+    async fn close_session(&self, session: &SessionSnapshot) -> Result<(), TransportError> {
+        if session.path_kind == model::PathKind::Relay {
+            close_relay_transport_session(
+                &*self.relay_control,
+                session.relay_control_endpoint.as_deref(),
+                session.transport_session_id,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 impl ConnectionHandle for QuicConnectionHandle {
     fn snapshot(&self) -> SessionSnapshot {
         self.session.clone()
@@ -108,7 +149,8 @@ fn direct_session_snapshot(
         .cloned()
         .ok_or_else(|| TransportError::NoRoute(route.peer.clone()))?;
     Ok(SessionSnapshot {
-        session_id: stable_session_id(route, &remote_endpoint, None),
+        session_id: logical_session_id(route),
+        transport_session_id: logical_session_id(route),
         relay_attempt_id: None,
         peer: route.peer.clone(),
         protocol: route.protocol.clone(),
@@ -118,6 +160,7 @@ fn direct_session_snapshot(
         remote_endpoint,
         relay_peer: None,
         relay_endpoint: None,
+        relay_control_endpoint: None,
         datagrams_capable: adapter.supports_datagrams,
         migration_capable: adapter.supports_path_migration,
     })
@@ -128,14 +171,12 @@ fn relay_session_snapshot(
     route: &RoutePlan,
     relay: &RelayPlan,
 ) -> Result<SessionSnapshot, TransportError> {
-    let network_id = adapter
-        .network_id
-        .clone()
-        .ok_or_else(|| TransportError::InvalidRoute("relay route requires network identity".into()))?;
-    let local_identity = adapter
-        .local_identity
-        .as_ref()
-        .ok_or_else(|| TransportError::InvalidRoute("relay route requires local identity".into()))?;
+    let network_id = adapter.network_id.clone().ok_or_else(|| {
+        TransportError::InvalidRoute("relay route requires network identity".into())
+    })?;
+    let local_identity = adapter.local_identity.as_ref().ok_or_else(|| {
+        TransportError::InvalidRoute("relay route requires local identity".into())
+    })?;
     if local_identity.peer_id() != route.local_peer {
         return Err(TransportError::InvalidRoute(
             "local identity peer does not match route local peer".into(),
@@ -156,25 +197,26 @@ fn relay_session_snapshot(
         1,
     );
     let attempt_id = random_attempt_id();
-    let relay_endpoint = relay
-        .relay_endpoints
-        .first()
-        .cloned()
-        .ok_or_else(|| TransportError::InvalidRoute("relay route has no relay endpoints".into()))?;
-    let accepted = adapter.relay_control.open_session(
-        &relay.relay_control_endpoint,
-        RelayOpenRequest {
-            attempt_id,
-            network_id,
-            source: route.local_peer.clone(),
-            source_public_key: local_identity.public_key(),
-            source_credential: credential,
-            destination: route.peer.clone(),
-            protocol: route.protocol.clone(),
-            traffic_class: route.class,
-        },
-    )
-    .map_err(|error| TransportError::RelayRejected(error.to_string()))?;
+    let relay_endpoint =
+        relay.relay_endpoints.first().cloned().ok_or_else(|| {
+            TransportError::InvalidRoute("relay route has no relay endpoints".into())
+        })?;
+    let accepted = adapter
+        .relay_control
+        .open_session(
+            &relay.relay_control_endpoint,
+            RelayOpenRequest {
+                attempt_id,
+                network_id,
+                source: route.local_peer.clone(),
+                source_public_key: local_identity.public_key(),
+                source_credential: credential,
+                destination: route.peer.clone(),
+                protocol: route.protocol.clone(),
+                traffic_class: route.class,
+            },
+        )
+        .map_err(|error| TransportError::RelayRejected(error.to_string()))?;
     let remote_endpoint = relay
         .destination_endpoints
         .first()
@@ -182,7 +224,8 @@ fn relay_session_snapshot(
         .or_else(|| route.remote_endpoints.first().cloned())
         .unwrap_or_else(|| route.peer.to_string());
     Ok(SessionSnapshot {
-        session_id: accepted.session_id,
+        session_id: logical_session_id(route),
+        transport_session_id: accepted.session_id,
         relay_attempt_id: Some(accepted.attempt_id),
         peer: route.peer.clone(),
         protocol: route.protocol.clone(),
@@ -192,6 +235,7 @@ fn relay_session_snapshot(
         remote_endpoint,
         relay_peer: Some(relay.relay_peer.clone()),
         relay_endpoint: Some(relay_endpoint),
+        relay_control_endpoint: Some(relay.relay_control_endpoint.clone()),
         datagrams_capable: adapter.supports_datagrams && relay.supports_datagrams,
         migration_capable: adapter.supports_path_migration && relay.supports_path_migration,
     })
@@ -203,21 +247,13 @@ fn random_attempt_id() -> [u8; 16] {
     attempt_id
 }
 
-fn stable_session_id(
-    route: &RoutePlan,
-    remote_endpoint: &str,
-    relay_peer: Option<&PeerId>,
-) -> [u8; 16] {
+fn logical_session_id(route: &RoutePlan) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(route.local_peer.as_bytes());
     hasher.update(route.peer.as_bytes());
     hasher.update(route.class_string().as_bytes());
-    hasher.update(route.path_kind_string().as_bytes());
-    hasher.update(remote_endpoint.as_bytes());
     if let Some(protocol) = &route.protocol {
         hasher.update(protocol.as_str().as_bytes());
-    }
-    if let Some(relay_peer) = relay_peer {
-        hasher.update(relay_peer.as_bytes());
     }
     let digest = hasher.finalize();
     let mut session_id = [0_u8; 16];
@@ -225,9 +261,21 @@ fn stable_session_id(
     session_id
 }
 
+fn close_relay_transport_session(
+    relay_control: &dyn RelayControl,
+    control_endpoint: Option<&str>,
+    transport_session_id: [u8; 16],
+) -> Result<(), TransportError> {
+    let endpoint = control_endpoint.ok_or_else(|| {
+        TransportError::InvalidRoute("relay session is missing relay control endpoint".into())
+    })?;
+    relay_control
+        .close_session(endpoint, transport_session_id, "path migrated".into())
+        .map_err(|error| TransportError::RelayRejected(error.to_string()))
+}
+
 trait RoutePlanExt {
     fn class_string(&self) -> &'static str;
-    fn path_kind_string(&self) -> &'static str;
 }
 
 impl RoutePlanExt for RoutePlan {
@@ -239,28 +287,27 @@ impl RoutePlanExt for RoutePlan {
             model::TrafficClass::Background => "background",
         }
     }
-
-    fn path_kind_string(&self) -> &'static str {
-        match self.path_kind {
-            model::PathKind::DirectUdp => "direct-udp",
-            model::PathKind::DirectIpv6 => "direct-ipv6",
-            model::PathKind::Relay => "relay",
-            model::PathKind::Loopback => "loopback",
-            model::PathKind::Lan => "lan",
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use model::{KeyAlgorithm, PathKind, PeerId, ProtocolId, TrafficClass};
     use relay::{
-        clear_registry, register_relay, InProcessRelayControl, RelayNode, RelayQuota,
-        RelayService,
+        clear_registry, register_relay, registered_session_count, InProcessRelayControl, RelayNode,
+        RelayQuota, RelayService,
     };
-    use transport::{BindSpec, RoutePlan, RouteSource, SecureTransport};
+    use transport::{BindSpec, RoutePlan, RouteSource, SecureTransport, SessionLifecycleTransport};
 
     use super::*;
+
+    fn relay_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("relay test lock")
+    }
 
     #[tokio::test]
     async fn adapter_returns_connection_metadata() {
@@ -304,6 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_returns_relay_session_metadata() {
+        let _guard = relay_test_lock();
         let destination = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"destination");
         let relay = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay");
         let local_identity = IdentityKeypair::from_secret_bytes([61_u8; 32]);
@@ -330,8 +378,9 @@ mod tests {
                 protocols: vec![ProtocolId::new("/quicnet/control/1").unwrap()],
             }],
         }));
-        let adapter = QuicTransportAdapter::with_identity(NetworkId::derive("relay-test"), local_identity)
-            .with_relay_control(Arc::new(InProcessRelayControl));
+        let adapter =
+            QuicTransportAdapter::with_identity(NetworkId::derive("relay-test"), local_identity)
+                .with_relay_control(Arc::new(InProcessRelayControl));
         let handle = adapter
             .connect(RoutePlan {
                 local_peer: local,
@@ -355,12 +404,16 @@ mod tests {
 
         assert_eq!(handle.session.peer, destination);
         assert_eq!(handle.session.relay_peer, Some(relay));
-        assert_eq!(handle.session.relay_endpoint.as_deref(), Some("quic://203.0.113.70:443"));
+        assert_eq!(
+            handle.session.relay_endpoint.as_deref(),
+            Some("quic://203.0.113.70:443")
+        );
         assert!(handle.session.relay_attempt_id.is_some());
     }
 
     #[tokio::test]
     async fn adapter_rejects_unavailable_relay_route() {
+        let _guard = relay_test_lock();
         clear_registry();
         let local_identity = IdentityKeypair::from_secret_bytes([62_u8; 32]);
         let adapter = QuicTransportAdapter::with_identity(
@@ -394,5 +447,152 @@ mod tests {
             .expect_err("relay connect should fail when relay is unavailable");
 
         assert!(matches!(error, TransportError::RelayRejected(_)));
+    }
+
+    #[tokio::test]
+    async fn adapter_closes_relay_session_in_registry() {
+        let _guard = relay_test_lock();
+        let destination = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"destination-close");
+        let relay = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-close");
+        let local_identity = IdentityKeypair::from_secret_bytes([63_u8; 32]);
+        let local = local_identity.peer_id();
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        clear_registry();
+        register_relay(RelayService::new(RelayNode {
+            announcement: relaywire::RelayAnnouncement {
+                peer_id: relay.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.90:443".to_string()],
+                control_endpoint: format!("inproc://{relay}"),
+                max_bandwidth_bps: 1_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
+            },
+            quotas: vec![RelayQuota {
+                peer: local.clone(),
+                max_bandwidth_bps: 100_000_000,
+                max_concurrent_sessions: 4,
+            }],
+            destinations: vec![relay::RelayDestination {
+                peer: destination.clone(),
+                protocols: vec![protocol.clone()],
+            }],
+        }));
+        let adapter =
+            QuicTransportAdapter::with_identity(NetworkId::derive("relay-test"), local_identity)
+                .with_relay_control(Arc::new(InProcessRelayControl));
+        let handle = adapter
+            .connect(RoutePlan {
+                local_peer: local,
+                peer: destination,
+                protocol: Some(protocol),
+                class: TrafficClass::Interactive,
+                path_kind: PathKind::Relay,
+                source: RouteSource::AuthorityRelay,
+                remote_endpoints: vec!["quic://198.51.100.30:9443".to_string()],
+                relay: Some(RelayPlan {
+                    relay_peer: relay.clone(),
+                    relay_endpoints: vec!["quic://203.0.113.90:443".to_string()],
+                    relay_control_endpoint: format!("inproc://{relay}"),
+                    destination_endpoints: vec!["quic://198.51.100.30:9443".to_string()],
+                    supports_datagrams: true,
+                    supports_path_migration: true,
+                }),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(registered_session_count(&relay), Some(1));
+
+        adapter.close_session(&handle.session).await.unwrap();
+
+        assert_eq!(registered_session_count(&relay), Some(0));
+    }
+
+    #[tokio::test]
+    async fn adapter_migrates_relay_session_to_direct_and_releases_old_transport() {
+        let _guard = relay_test_lock();
+        let destination = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"destination-migrate");
+        let relay = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-migrate");
+        let local_identity = IdentityKeypair::from_secret_bytes([64_u8; 32]);
+        let local = local_identity.peer_id();
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        clear_registry();
+        register_relay(RelayService::new(RelayNode {
+            announcement: relaywire::RelayAnnouncement {
+                peer_id: relay.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.91:443".to_string()],
+                control_endpoint: format!("inproc://{relay}"),
+                max_bandwidth_bps: 1_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec!["NetworkControl".to_string(), "InteractiveRpc".to_string()],
+            },
+            quotas: vec![RelayQuota {
+                peer: local.clone(),
+                max_bandwidth_bps: 100_000_000,
+                max_concurrent_sessions: 4,
+            }],
+            destinations: vec![relay::RelayDestination {
+                peer: destination.clone(),
+                protocols: vec![protocol.clone()],
+            }],
+        }));
+        let adapter =
+            QuicTransportAdapter::with_identity(NetworkId::derive("relay-test"), local_identity)
+                .with_relay_control(Arc::new(InProcessRelayControl));
+        let relay_handle = adapter
+            .connect(RoutePlan {
+                local_peer: local.clone(),
+                peer: destination.clone(),
+                protocol: Some(protocol.clone()),
+                class: TrafficClass::Interactive,
+                path_kind: PathKind::Relay,
+                source: RouteSource::AuthorityRelay,
+                remote_endpoints: vec!["quic://198.51.100.31:9443".to_string()],
+                relay: Some(RelayPlan {
+                    relay_peer: relay.clone(),
+                    relay_endpoints: vec!["quic://203.0.113.91:443".to_string()],
+                    relay_control_endpoint: format!("inproc://{relay}"),
+                    destination_endpoints: vec!["quic://198.51.100.31:9443".to_string()],
+                    supports_datagrams: true,
+                    supports_path_migration: true,
+                }),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(registered_session_count(&relay), Some(1));
+
+        let migrated = adapter
+            .migrate(
+                &relay_handle.session,
+                RoutePlan {
+                    local_peer: local,
+                    peer: destination,
+                    protocol: Some(protocol),
+                    class: TrafficClass::Interactive,
+                    path_kind: PathKind::DirectUdp,
+                    source: RouteSource::Observed,
+                    remote_endpoints: vec!["quic://198.51.100.31:9443".to_string()],
+                    relay: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(migrated.session_id, relay_handle.session.session_id);
+        assert_eq!(migrated.transport_session_id, migrated.session_id);
+        assert_ne!(
+            migrated.transport_session_id,
+            relay_handle.session.transport_session_id
+        );
+        assert_eq!(migrated.path_kind, PathKind::DirectUdp);
+        assert!(migrated.relay_peer.is_none());
+        assert!(migrated.relay_endpoint.is_none());
+        assert!(migrated.relay_control_endpoint.is_none());
+        assert_eq!(registered_session_count(&relay), Some(0));
     }
 }

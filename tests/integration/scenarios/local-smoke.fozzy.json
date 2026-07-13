@@ -14,6 +14,15 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "reconcile_sessions"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
       "args": ["run", "-p", "quicnet", "--", "status"],
       "exit_code": 0,
       "stdout": "",

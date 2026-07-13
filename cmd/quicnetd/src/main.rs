@@ -85,7 +85,7 @@ async fn main() {
         }
     }
     .expect("daemon state should persist");
-    let state = if args.revocation_sync {
+    let mut state = if args.revocation_sync {
         if let Some(origin) = args.authority_origin.as_deref() {
             control
                 .sync_authority_revocations_origin(origin)
@@ -98,15 +98,34 @@ async fn main() {
         state
     };
     let reconcile_report = if args.reconcile {
-        let report = match control.reconcile_report().await {
+        let transport = QuicTransportAdapter::with_identity(
+            fabric::NetworkId::derive(&args.network),
+            load_identity(&args.identity_path, &args.identity_passphrase_env),
+        );
+        let report = match control.reconcile_sessions(&transport).await {
             Ok(report) => report,
             Err(error) => {
                 eprintln!("reconcile failed: {error}");
                 std::process::exit(1);
             }
         };
+        state = control
+            .ensure_state()
+            .expect("daemon state should remain readable after reconcile");
         if args.reconcile_verbose {
-            println!("{}", report.detail_line());
+            for entry in &report.entries {
+                println!(
+                    "quicnetd reconcile session_id={} peer={} disposition={} path={} reason={}",
+                    hex_session_id(&entry.session_id),
+                    entry.peer,
+                    reconcile_disposition_label(&entry.disposition),
+                    entry
+                        .path_kind
+                        .map(|path| format!("{path:?}"))
+                        .unwrap_or_else(|| "none".to_string()),
+                    entry.reason
+                );
+            }
         }
         Some(report)
     } else {
@@ -126,7 +145,12 @@ async fn main() {
         );
         Some(
             match control
-                .realize_best_path(&target, &protocol, parse_class(&args.connect_class), &transport)
+                .realize_best_path(
+                    &target,
+                    &protocol,
+                    parse_class(&args.connect_class),
+                    &transport,
+                )
                 .await
             {
                 Ok(session) => session,
@@ -154,7 +178,7 @@ async fn main() {
             .unwrap_or_else(|| "none".to_string()),
         reconcile_report
             .as_ref()
-            .map(|report| report.summary_line())
+            .map(reconcile_summary_line)
             .unwrap_or_else(|| "disabled".to_string()),
         args.state_path
     );
@@ -176,6 +200,13 @@ fn hex_session_id(session_id: &[u8; 16]) -> String {
         .collect::<String>()
 }
 
+fn reconcile_summary_line(report: &fabric::SessionReconcileReport) -> String {
+    format!(
+        "examined={} upgraded={} closed={} unchanged={}",
+        report.examined, report.upgraded, report.closed, report.unchanged
+    )
+}
+
 fn load_identity(identity_path: &str, passphrase_env: &str) -> IdentityKeypair {
     let passphrase = std::env::var(passphrase_env)
         .unwrap_or_else(|_| panic!("identity passphrase env var {passphrase_env} must be set"));
@@ -184,44 +215,10 @@ fn load_identity(identity_path: &str, passphrase_env: &str) -> IdentityKeypair {
         .expect("identity keystore should load")
 }
 
-struct SessionReconcileReport {
-    examined_sessions: usize,
-    closed_sessions: usize,
-    upgraded_sessions: usize,
-    unchanged_sessions: usize,
-}
-
-impl SessionReconcileReport {
-    fn summary_line(&self) -> String {
-        format!(
-            "examined={} upgraded={} closed={} unchanged={}",
-            self.examined_sessions,
-            self.upgraded_sessions,
-            self.closed_sessions,
-            self.unchanged_sessions
-        )
-    }
-
-    fn detail_line(&self) -> String {
-        format!("quicnetd reconcile: {}", self.summary_line())
-    }
-}
-
-trait LocalControlPlaneReconcileExt {
-    async fn reconcile_report(&self) -> Result<SessionReconcileReport, String>;
-}
-
-impl LocalControlPlaneReconcileExt for LocalControlPlane {
-    async fn reconcile_report(&self) -> Result<SessionReconcileReport, String> {
-        let state = self
-            .refresh_and_persist()
-            .map_err(|error| error.to_string())?;
-        let examined_sessions = state.active_sessions().len();
-        Ok(SessionReconcileReport {
-            examined_sessions,
-            closed_sessions: 0,
-            upgraded_sessions: 0,
-            unchanged_sessions: examined_sessions,
-        })
+fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition) -> &'static str {
+    match disposition {
+        fabric::SessionReconcileDisposition::Unchanged => "unchanged",
+        fabric::SessionReconcileDisposition::Upgraded => "upgraded",
+        fabric::SessionReconcileDisposition::Closed => "closed",
     }
 }

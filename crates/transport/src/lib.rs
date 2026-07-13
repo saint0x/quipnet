@@ -69,6 +69,7 @@ pub struct MessageReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub session_id: [u8; 16],
+    pub transport_session_id: [u8; 16],
     pub relay_attempt_id: Option<[u8; 16]>,
     pub peer: PeerId,
     pub protocol: Option<ProtocolId>,
@@ -78,6 +79,7 @@ pub struct SessionSnapshot {
     pub remote_endpoint: String,
     pub relay_peer: Option<PeerId>,
     pub relay_endpoint: Option<String>,
+    pub relay_control_endpoint: Option<String>,
     pub datagrams_capable: bool,
     pub migration_capable: bool,
 }
@@ -93,6 +95,17 @@ pub trait SecureTransport: Send + Sync {
 
     async fn connect(&self, route: RoutePlan) -> Result<Self::Connection, TransportError>;
     async fn listen(&self, bind: BindSpec) -> Result<Self::Listener, TransportError>;
+}
+
+#[async_trait]
+pub trait SessionLifecycleTransport: SecureTransport {
+    async fn migrate(
+        &self,
+        session: &SessionSnapshot,
+        route: RoutePlan,
+    ) -> Result<SessionSnapshot, TransportError>;
+
+    async fn close_session(&self, session: &SessionSnapshot) -> Result<(), TransportError>;
 }
 
 #[async_trait]
