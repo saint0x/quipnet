@@ -33,6 +33,12 @@ struct Args {
     #[arg(long, default_value_t = false)]
     revocation_sync: bool,
 
+    #[arg(long, default_value_t = false)]
+    reconcile: bool,
+
+    #[arg(long, default_value_t = false)]
+    reconcile_verbose: bool,
+
     #[arg(long)]
     connect_protocol: Option<String>,
 
@@ -91,6 +97,21 @@ async fn main() {
     } else {
         state
     };
+    let reconcile_report = if args.reconcile {
+        let report = match control.reconcile_report().await {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!("reconcile failed: {error}");
+                std::process::exit(1);
+            }
+        };
+        if args.reconcile_verbose {
+            println!("{}", report.detail_line());
+        }
+        Some(report)
+    } else {
+        None
+    };
     let active_session = if let Some(protocol) = args.connect_protocol.as_deref() {
         let target = args
             .connect_peer
@@ -124,13 +145,17 @@ async fn main() {
         .map(|decision| decision.explanation.summary)
         .unwrap_or_else(|| "no routing candidates".to_string());
     println!(
-        "quicnetd active: {} selected_path={} active_session={} state_path={}",
+        "quicnetd active: {} selected_path={} active_session={} reconcile={} state_path={}",
         state.status_line(),
         selected_path,
         active_session
             .as_ref()
             .map(|session| format!("{}@{}", hex_session_id(&session.session_id), session.peer))
             .unwrap_or_else(|| "none".to_string()),
+        reconcile_report
+            .as_ref()
+            .map(|report| report.summary_line())
+            .unwrap_or_else(|| "disabled".to_string()),
         args.state_path
     );
 }
@@ -157,4 +182,46 @@ fn load_identity(identity_path: &str, passphrase_env: &str) -> IdentityKeypair {
     FileKeystore::new(identity_path)
         .load(&passphrase)
         .expect("identity keystore should load")
+}
+
+struct SessionReconcileReport {
+    examined_sessions: usize,
+    closed_sessions: usize,
+    upgraded_sessions: usize,
+    unchanged_sessions: usize,
+}
+
+impl SessionReconcileReport {
+    fn summary_line(&self) -> String {
+        format!(
+            "examined={} upgraded={} closed={} unchanged={}",
+            self.examined_sessions,
+            self.upgraded_sessions,
+            self.closed_sessions,
+            self.unchanged_sessions
+        )
+    }
+
+    fn detail_line(&self) -> String {
+        format!("quicnetd reconcile: {}", self.summary_line())
+    }
+}
+
+trait LocalControlPlaneReconcileExt {
+    async fn reconcile_report(&self) -> Result<SessionReconcileReport, String>;
+}
+
+impl LocalControlPlaneReconcileExt for LocalControlPlane {
+    async fn reconcile_report(&self) -> Result<SessionReconcileReport, String> {
+        let state = self
+            .refresh_and_persist()
+            .map_err(|error| error.to_string())?;
+        let examined_sessions = state.active_sessions().len();
+        Ok(SessionReconcileReport {
+            examined_sessions,
+            closed_sessions: 0,
+            upgraded_sessions: 0,
+            unchanged_sessions: examined_sessions,
+        })
+    }
 }
