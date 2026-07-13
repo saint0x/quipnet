@@ -39,20 +39,6 @@ enum Command {
         #[arg(long)]
         authority_subject: Option<String>,
     },
-    Sync {
-        #[arg(long)]
-        authority_snapshot: String,
-    },
-    SyncOrigin {
-        #[arg(long)]
-        authority_origin: String,
-        #[arg(long)]
-        authority_subject: Option<String>,
-    },
-    SyncRevocationsOrigin {
-        #[arg(long)]
-        authority_origin: String,
-    },
     Status,
     Peers,
     PeerInspect {
@@ -89,9 +75,13 @@ enum Command {
         #[command(subcommand)]
         command: StateCommand,
     },
-    IdentityInit {
-        #[arg(long, default_value_t = false)]
-        overwrite: bool,
+    Authority {
+        #[command(subcommand)]
+        command: AuthorityCommand,
+    },
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommand,
     },
     RelayStatus,
 }
@@ -125,6 +115,34 @@ enum StateCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum AuthorityCommand {
+    Show,
+    SyncSnapshot {
+        #[arg(long)]
+        authority_snapshot: String,
+    },
+    SyncOrigin {
+        #[arg(long)]
+        authority_origin: String,
+        #[arg(long)]
+        authority_subject: Option<String>,
+    },
+    SyncRevocationsOrigin {
+        #[arg(long)]
+        authority_origin: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum IdentityCommand {
+    Show,
+    Init {
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(error) = run().await {
@@ -142,16 +160,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
         cli.state_path.clone(),
     ));
     match cli.command.unwrap_or(Command::Status) {
-        Command::IdentityInit { overwrite } => {
-            let identity =
-                init_identity(&cli.identity_path, &cli.identity_passphrase_env, overwrite)?;
-            println!(
-                "identity_path={} peer={} public_key_hex={}",
-                cli.identity_path,
-                identity.peer_id(),
-                hex_public_key(&identity)
-            );
-        }
         Command::Join { authority_snapshot } => {
             let state = control.seed_from_authority_snapshot(&authority_snapshot)?;
             println!(
@@ -176,53 +184,6 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 cli.state_path,
                 authority_origin,
                 authority_subject.as_deref().unwrap_or("active")
-            );
-        }
-        Command::Sync { authority_snapshot } => {
-            let (state, report) = control.sync_authority_snapshot(&authority_snapshot)?;
-            println!(
-                "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={}",
-                state.network,
-                state.local_peer_id,
-                report.grants_added,
-                report.revocations_added,
-                report.bootstrap_hints_added,
-                report.relay_announcements_added,
-                report.membership_changed,
-                cli.state_path
-            );
-        }
-        Command::SyncOrigin {
-            authority_origin,
-            authority_subject,
-        } => {
-            let (state, report) =
-                control.sync_authority_origin(&authority_origin, authority_subject.as_deref())?;
-            println!(
-                "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={} authority_origin={} authority_subject={}",
-                state.network,
-                state.local_peer_id,
-                report.grants_added,
-                report.revocations_added,
-                report.bootstrap_hints_added,
-                report.relay_announcements_added,
-                report.membership_changed,
-                cli.state_path,
-                authority_origin,
-                authority_subject.as_deref().unwrap_or("active")
-            );
-        }
-        Command::SyncRevocationsOrigin { authority_origin } => {
-            let (state, revocations_added) =
-                control.sync_authority_revocations_origin(&authority_origin)?;
-            println!(
-                "synced-revocations network={} local_peer={} revocations_added={} denied={} state_path={} authority_origin={}",
-                state.network,
-                state.local_peer_id,
-                revocations_added,
-                state.denied_peers.len(),
-                cli.state_path,
-                authority_origin
             );
         }
         Command::Status => {
@@ -418,6 +379,91 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     "state_path={} identity_preserved=true network_state_reset={} next_action=bootstrap_required",
                     cli.state_path,
                     removed
+                );
+            }
+        },
+        Command::Authority { command } => match command {
+            AuthorityCommand::Show => {
+                let state = control.ensure_state()?;
+                println!(
+                    "network={} local_peer={} membership_subject={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} durable_only=true",
+                    state.network,
+                    state.local_peer_id,
+                    state.membership.subject_peer_id,
+                    state.capability_grants.len(),
+                    state.revocations.len(),
+                    state.denied_peers.len(),
+                    state.bootstrap.len(),
+                    state.relay_count(),
+                    state.schema_version
+                );
+            }
+            AuthorityCommand::SyncSnapshot { authority_snapshot } => {
+                let (state, report) = control.sync_authority_snapshot(&authority_snapshot)?;
+                println!(
+                    "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={} authority_source=snapshot",
+                    state.network,
+                    state.local_peer_id,
+                    report.grants_added,
+                    report.revocations_added,
+                    report.bootstrap_hints_added,
+                    report.relay_announcements_added,
+                    report.membership_changed,
+                    cli.state_path
+                );
+            }
+            AuthorityCommand::SyncOrigin {
+                authority_origin,
+                authority_subject,
+            } => {
+                let (state, report) = control
+                    .sync_authority_origin(&authority_origin, authority_subject.as_deref())?;
+                println!(
+                    "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={} authority_origin={} authority_subject={}",
+                    state.network,
+                    state.local_peer_id,
+                    report.grants_added,
+                    report.revocations_added,
+                    report.bootstrap_hints_added,
+                    report.relay_announcements_added,
+                    report.membership_changed,
+                    cli.state_path,
+                    authority_origin,
+                    authority_subject.as_deref().unwrap_or("active")
+                );
+            }
+            AuthorityCommand::SyncRevocationsOrigin { authority_origin } => {
+                let (state, revocations_added) =
+                    control.sync_authority_revocations_origin(&authority_origin)?;
+                println!(
+                    "synced-revocations network={} local_peer={} revocations_added={} denied={} state_path={} authority_origin={}",
+                    state.network,
+                    state.local_peer_id,
+                    revocations_added,
+                    state.denied_peers.len(),
+                    cli.state_path,
+                    authority_origin
+                );
+            }
+        },
+        Command::Identity { command } => match command {
+            IdentityCommand::Show => {
+                let identity = load_identity(&cli.identity_path, &cli.identity_passphrase_env)?;
+                println!(
+                    "identity_path={} peer={} public_key_hex={}",
+                    cli.identity_path,
+                    identity.peer_id(),
+                    hex_public_key(&identity)
+                );
+            }
+            IdentityCommand::Init { overwrite } => {
+                let identity =
+                    init_identity(&cli.identity_path, &cli.identity_passphrase_env, overwrite)?;
+                println!(
+                    "identity_path={} peer={} public_key_hex={}",
+                    cli.identity_path,
+                    identity.peer_id(),
+                    hex_public_key(&identity)
                 );
             }
         },
@@ -706,6 +752,26 @@ mod tests {
         );
 
         assert!(error.to_string().contains("--confirm"));
+    }
+
+    #[test]
+    fn authority_show_output_is_durable_not_runtime() {
+        let state = fabric::fixture_daemon_state("authority-show-cli");
+        let output = format!(
+            "network={} local_peer={} membership_subject={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} durable_only=true",
+            state.network,
+            state.local_peer_id,
+            state.membership.subject_peer_id,
+            state.capability_grants.len(),
+            state.revocations.len(),
+            state.denied_peers.len(),
+            state.bootstrap.len(),
+            state.relay_count(),
+            state.schema_version
+        );
+
+        assert!(output.contains("durable_only=true"));
+        assert!(output.contains("schema_version="));
     }
 
     #[test]
