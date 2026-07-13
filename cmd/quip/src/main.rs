@@ -250,7 +250,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             match daemon_request::<RuntimeStatusResult>(&cli, "runtime.status", json!({})) {
                 Ok(status) => {
                     println!(
-                        "daemon_health={} identity_status={} identity_peer={} durable_state_status={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} runtime_sessions={} active_paths={} reconnect_state={} truth_kind={}",
+                        "daemon_health={} identity_status={} identity_peer={} durable_state_status={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_unchanged_sessions={} authority_reevaluated_listeners={} authority_suppressed_listeners={} authority_restored_listeners={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} runtime_sessions={} active_paths={} reconnect_state={} truth_kind={}",
                         status.daemon_health,
                         status.identity.status,
                         status.identity.node_id,
@@ -266,6 +266,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                         status.authority.degraded_sessions,
                         status.authority.migrated_sessions,
                         status.authority.unchanged_sessions,
+                        status.authority.reevaluated_listeners,
+                        status.authority.suppressed_listeners,
+                        status.authority.restored_listeners,
                         status.authority.reconnect_suppressions_added,
                         status.authority.reconnect_suppressions_cleared,
                         status.authority.last_accepted_revision,
@@ -725,7 +728,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
                 let authority =
                     daemon_request::<AuthorityShowResult>(&cli, "authority.show", json!({}))?;
                 println!(
-                    "network={} local_peer={} membership_subject={} membership_issuer={} roles={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} configured_origin={} configured_subject={} configured_snapshot={} truth_kind={}",
+                    "network={} local_peer={} membership_subject={} membership_issuer={} roles={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_degraded_sessions={} authority_migrated_sessions={} authority_unchanged_sessions={} authority_reevaluated_listeners={} authority_suppressed_listeners={} authority_restored_listeners={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} configured_origin={} configured_subject={} configured_snapshot={} truth_kind={}",
                     authority.network,
                     authority.local_peer_id,
                     authority.membership_subject_peer_id,
@@ -751,6 +754,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
                     authority.authority.degraded_sessions,
                     authority.authority.migrated_sessions,
                     authority.authority.unchanged_sessions,
+                    authority.authority.reevaluated_listeners,
+                    authority.authority.suppressed_listeners,
+                    authority.authority.restored_listeners,
                     authority.authority.reconnect_suppressions_added,
                     authority.authority.reconnect_suppressions_cleared,
                     authority.authority.last_accepted_revision,
@@ -1095,12 +1101,13 @@ fn filter_runtime_paths(
 
 fn render_runtime_listener_line(listener: &RuntimeListenerEntry, truth_kind: &str) -> String {
     format!(
-        "listener_id={} transport={} protocol={} advertise={} state={} bind_summary={} age_seconds={} truth_kind={}",
+        "listener_id={} transport={} protocol={} advertise={} state={} state_reason={} bind_summary={} age_seconds={} truth_kind={}",
         listener.listener_id,
         listener.transport,
         listener.protocol,
         listener.advertise,
         listener.state,
+        listener.state_reason.as_deref().unwrap_or("none"),
         listener.bind_summary,
         listener.age_seconds,
         truth_kind
@@ -1131,7 +1138,7 @@ fn render_runtime_path_watch_snapshot(
 
 fn render_runtime_path_line(path: &RuntimePathEntry, truth_kind: &str) -> String {
     format!(
-        "session_id={} peer={} protocol={} class={} state={} path={} source={} relay_peer={} endpoint={} score={} state_reason={} summary=\"{}\" alternatives=[{}] truth_kind={}",
+        "session_id={} peer={} protocol={} class={} state={} path={} source={} relay_peer={} endpoint={} score={} state_reason={} decision_reason={} summary=\"{}\" alternatives=[{}] truth_kind={}",
         path.session_id.as_deref().unwrap_or("none"),
         path.peer_id,
         path.protocol.as_deref().unwrap_or("none"),
@@ -1145,6 +1152,7 @@ fn render_runtime_path_line(path: &RuntimePathEntry, truth_kind: &str) -> String
             .map(|score| score.to_string())
             .unwrap_or_else(|| "none".to_string()),
         path.state_reason.as_deref().unwrap_or("none"),
+        path.decision_reason.as_deref().unwrap_or("none"),
         path.summary,
         render_runtime_path_alternatives(&path.alternatives),
         truth_kind
@@ -1511,6 +1519,9 @@ mod tests {
                     .to_string(),
                 score: Some(42),
                 state_reason: Some("selected by daemon".to_string()),
+                decision_reason: Some(
+                    "relay preserved continuity while direct remained weaker".to_string(),
+                ),
                 summary: "relay path chosen for continuity".to_string(),
                 alternatives: vec![RuntimePathAlternativeEntry {
                     path_class: "direct".to_string(),
@@ -1538,6 +1549,7 @@ mod tests {
                 protocol: "/quicnet/control/1".to_string(),
                 advertise: true,
                 state: "active".to_string(),
+                state_reason: None,
                 age_seconds: 7,
             },
             "runtime",
@@ -1563,6 +1575,7 @@ mod tests {
                 endpoint_summary: "203.0.113.10:443".to_string(),
                 score: Some(10),
                 state_reason: None,
+                decision_reason: None,
                 summary: "direct path".to_string(),
                 alternatives: Vec::new(),
             },
@@ -1578,6 +1591,7 @@ mod tests {
                 endpoint_summary: "relay=relay-b".to_string(),
                 score: Some(20),
                 state_reason: Some("policy denied".to_string()),
+                decision_reason: None,
                 summary: "suppressed".to_string(),
                 alternatives: Vec::new(),
             },

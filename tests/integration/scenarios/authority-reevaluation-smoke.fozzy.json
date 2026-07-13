@@ -59,6 +59,15 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "runtime_health_reports_listener_and_suppression_state"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
       "args": ["test", "-p", "quipd", "authority_sync_response_triggers_live_reevaluation_when_grants_are_removed"],
       "exit_code": 0,
       "stdout": "",
@@ -69,6 +78,15 @@
       "type": "proc_when",
       "cmd": "cargo",
       "args": ["test", "-p", "quipd", "identity_"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "daemonapi", "daemon_fixtures_deserialize_and_schemas_expose_new_fields"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",

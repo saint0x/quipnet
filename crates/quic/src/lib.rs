@@ -166,6 +166,7 @@ impl SecureTransport for QuicTransportAdapter {
                     protocol: bind.protocol,
                     advertise: bind.advertise,
                     state: RuntimeListenerState::Active,
+                    state_reason: None,
                     started_at_unix_secs: current_unix_secs(),
                 },
             },
@@ -348,6 +349,24 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .collect())
     }
 
+    fn update_listener_state(
+        &self,
+        listener_id: &str,
+        state: RuntimeListenerState,
+        state_reason: Option<String>,
+    ) -> Result<Option<RuntimeListenerSnapshot>, TransportError> {
+        let mut listeners = self
+            .runtime_listeners
+            .write()
+            .expect("runtime listener registry should remain writable");
+        let Some(record) = listeners.get_mut(listener_id) else {
+            return Ok(None);
+        };
+        record.snapshot.state = state;
+        record.snapshot.state_reason = state_reason;
+        Ok(Some(record.snapshot.clone()))
+    }
+
     fn transport_health(&self) -> Result<RuntimeTransportHealth, TransportError> {
         let active_sessions = self
             .runtime_sessions
@@ -358,7 +377,9 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .runtime_listeners
             .read()
             .expect("runtime listener registry should remain readable")
-            .len();
+            .values()
+            .filter(|record| record.snapshot.state == RuntimeListenerState::Active)
+            .count();
         let reconnect_suppression_count = self
             .reconnect_suppressions
             .read()

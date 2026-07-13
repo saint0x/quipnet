@@ -59,7 +59,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["session", "peer", "authority", "path", "runtime"]
+          "enum": ["session", "peer", "authority", "path", "listener", "runtime"]
         },
         "id": {
           "type": "string",

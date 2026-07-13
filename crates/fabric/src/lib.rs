@@ -173,6 +173,9 @@ pub struct AuthorityReevaluationReport {
     pub degraded_sessions: usize,
     pub migrated_sessions: usize,
     pub unchanged_sessions: usize,
+    pub reevaluated_listeners: usize,
+    pub suppressed_listeners: usize,
+    pub restored_listeners: usize,
     pub reconnect_suppressions_added: usize,
     pub reconnect_suppressions_cleared: usize,
     pub local_policy_denied: bool,
@@ -187,6 +190,7 @@ pub struct AuthorityReevaluationReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimePathState {
+    Candidate,
     Active,
     Degraded,
     Migrating,
@@ -215,6 +219,7 @@ pub struct RuntimePathSnapshot {
     pub relay_peer: Option<PeerId>,
     pub endpoint_summary: String,
     pub state_reason: Option<String>,
+    pub decision_reason: Option<String>,
     pub score: Option<u32>,
     pub summary: String,
     pub alternatives: Vec<RuntimePathAlternative>,
@@ -350,6 +355,10 @@ impl DaemonState {
             };
         }
 
+        self.explain_local_protocol_policy(protocol)
+    }
+
+    pub fn explain_local_protocol_policy(&self, protocol: &ProtocolId) -> Decision {
         let grants = self.grants_for_peer(&self.local_peer_id);
         let engine = PolicyEngine::with_rules(vec![PolicyRule {
             effect: Effect::Allow,
@@ -1418,6 +1427,7 @@ impl LocalControlPlane {
                 relay_peer: session.relay_peer.clone(),
                 endpoint_summary: runtime_session_endpoint_summary(&session),
                 state_reason: session.state_reason.clone(),
+                decision_reason: explanation.as_ref().map(runtime_path_decision_reason),
                 score: selected.map(|candidate| candidate.score(session.class)),
                 summary: explanation
                     .map(|explanation| explanation.summary)
@@ -1465,6 +1475,9 @@ impl LocalControlPlane {
                     .map(runtime_candidate_endpoint_summary)
                     .unwrap_or_else(|| "no active runtime path".to_string()),
                 state_reason: Some(suppression.reason.clone()),
+                decision_reason: selected
+                    .as_ref()
+                    .map(|decision| runtime_path_decision_reason(&decision.explanation)),
                 score: selected_candidate.map(|candidate| candidate.score(suppression.class)),
                 summary: suppressed_summary,
                 alternatives: runtime_path_alternatives(
@@ -1475,11 +1488,117 @@ impl LocalControlPlane {
             });
         }
 
+        let reconnect_attempts = transport.reconnect_attempts()?;
+        for attempt in reconnect_attempts {
+            if snapshots.iter().any(|entry| {
+                entry.peer == attempt.peer
+                    && entry.protocol == attempt.protocol
+                    && entry.class == attempt.class
+            }) {
+                continue;
+            }
+            let candidates = state.path_candidates_for(&attempt.peer);
+            let selected = select_best_path(&candidates, attempt.class);
+            let selected_candidate = selected.as_ref().map(|decision| &decision.selected);
+            let (state_kind, state_reason, summary) = match attempt.state {
+                RuntimeReconnectAttemptState::BackingOff => (
+                    RuntimePathState::Candidate,
+                    Some(attempt.reason.clone()),
+                    format!(
+                        "reconnect backing off for {} until {}",
+                        attempt.peer, attempt.next_attempt_unix_secs
+                    ),
+                ),
+                RuntimeReconnectAttemptState::Failed => (
+                    RuntimePathState::Failed,
+                    Some(attempt.reason.clone()),
+                    format!("reconnect failed for {}", attempt.peer),
+                ),
+            };
+            snapshots.push(RuntimePathSnapshot {
+                session_id: None,
+                peer: attempt.peer.clone(),
+                protocol: attempt.protocol.clone(),
+                class: attempt.class,
+                state: state_kind,
+                path_kind: selected_candidate.map(|candidate| candidate.path_kind),
+                source: selected_candidate.map(|candidate| candidate.source.clone()),
+                relay_peer: selected_candidate.and_then(|candidate| candidate.relay_peer.clone()),
+                endpoint_summary: selected_candidate
+                    .map(runtime_candidate_endpoint_summary)
+                    .unwrap_or_else(|| "no known runtime candidate path".to_string()),
+                state_reason,
+                decision_reason: selected
+                    .as_ref()
+                    .map(|decision| runtime_path_decision_reason(&decision.explanation)),
+                score: selected_candidate.map(|candidate| candidate.score(attempt.class)),
+                summary,
+                alternatives: runtime_path_alternatives(
+                    &candidates,
+                    attempt.class,
+                    selected_candidate,
+                ),
+            });
+        }
+
+        let path_classes = [
+            TrafficClass::Control,
+            TrafficClass::Interactive,
+            TrafficClass::Bulk,
+            TrafficClass::Background,
+        ];
+        for peer in state.peers.iter().map(|entry| entry.snapshot.peer.clone()) {
+            let candidates = state.path_candidates_for(&peer);
+            if candidates.is_empty() {
+                continue;
+            }
+            for class in path_classes {
+                if snapshots
+                    .iter()
+                    .any(|entry| entry.peer == peer && entry.class == class)
+                {
+                    continue;
+                }
+                let selected = select_best_path(&candidates, class);
+                let Some(selected) = selected else {
+                    continue;
+                };
+                let selected_candidate = &selected.selected;
+                snapshots.push(RuntimePathSnapshot {
+                    session_id: None,
+                    peer: peer.clone(),
+                    protocol: None,
+                    class,
+                    state: RuntimePathState::Candidate,
+                    path_kind: Some(selected_candidate.path_kind),
+                    source: Some(selected_candidate.source.clone()),
+                    relay_peer: selected_candidate.relay_peer.clone(),
+                    endpoint_summary: runtime_candidate_endpoint_summary(selected_candidate),
+                    state_reason: Some("known candidate path is not currently active".to_string()),
+                    decision_reason: Some(runtime_path_decision_reason(&selected.explanation)),
+                    score: Some(selected_candidate.score(class)),
+                    summary: format!(
+                        "candidate path available for {}: {}",
+                        peer, selected.explanation.summary
+                    ),
+                    alternatives: runtime_path_alternatives(
+                        &candidates,
+                        class,
+                        Some(selected_candidate),
+                    ),
+                });
+            }
+        }
+
         snapshots.sort_by(|left, right| {
             left.peer
                 .to_string()
                 .cmp(&right.peer.to_string())
                 .then(runtime_class_rank(left.class).cmp(&runtime_class_rank(right.class)))
+                .then(
+                    runtime_path_state_rank(&left.state)
+                        .cmp(&runtime_path_state_rank(&right.state)),
+                )
                 .then(left.session_id.cmp(&right.session_id))
         });
         Ok(snapshots)
@@ -1492,7 +1611,35 @@ impl LocalControlPlane {
     where
         T: SessionLifecycleTransport,
     {
-        transport.active_listeners().map_err(Into::into)
+        let state = self.ensure_state()?;
+        let local_policy_reason = if state.membership.subject_peer_id != state.local_peer_id {
+            Some(format!(
+                "authority subject {} does not match runtime identity {}",
+                state.membership.subject_peer_id, state.local_peer_id
+            ))
+        } else {
+            state.deny_reason(&state.local_peer_id).map(str::to_string)
+        };
+        let mut listeners = transport.active_listeners()?;
+        for listener in &mut listeners {
+            if listener.state == RuntimeListenerState::Failed {
+                continue;
+            }
+            if let Some(reason) = local_policy_reason.clone() {
+                listener.state = RuntimeListenerState::Suppressed;
+                listener.state_reason = Some(reason);
+                continue;
+            }
+            let decision = state.explain_local_protocol_policy(&listener.protocol);
+            if !decision.allowed {
+                listener.state = RuntimeListenerState::Suppressed;
+                listener.state_reason = Some(decision.reason);
+            } else if listener.state == RuntimeListenerState::Suppressed {
+                listener.state = RuntimeListenerState::Active;
+                listener.state_reason = None;
+            }
+        }
+        Ok(listeners)
     }
 
     pub fn runtime_health<T>(&self, transport: &T) -> Result<RuntimeHealthReport, DaemonStateError>
@@ -1501,6 +1648,11 @@ impl LocalControlPlane {
     {
         let state = self.ensure_state()?;
         let transport_health = transport.transport_health()?;
+        let active_listeners = self
+            .runtime_listeners(transport)?
+            .into_iter()
+            .filter(|listener| listener.state == RuntimeListenerState::Active)
+            .count();
         let active_paths = self
             .runtime_paths(transport)?
             .into_iter()
@@ -1551,7 +1703,7 @@ impl LocalControlPlane {
             authority_deny_reason,
             active_sessions: transport_health.active_sessions,
             active_paths,
-            active_listeners: transport_health.active_listeners,
+            active_listeners,
             reconnect_state: transport_health.reconnect_state,
             reconnect_attempt_count: transport_health.reconnect_attempt_count,
             reconnect_next_attempt_unix_secs: transport_health.reconnect_next_attempt_unix_secs,
@@ -1600,6 +1752,9 @@ impl LocalControlPlane {
         let mut degraded_sessions = 0;
         let mut migrated_sessions = 0;
         let mut unchanged_sessions = 0;
+        let mut reevaluated_listeners = 0;
+        let mut suppressed_listeners = 0;
+        let mut restored_listeners = 0;
         let mut reconnect_suppressions_added = 0;
         let mut reconnect_suppressions_cleared = 0;
         let mut subject_mismatch_sessions = 0;
@@ -1785,12 +1940,64 @@ impl LocalControlPlane {
             }
         }
 
+        for listener in transport.active_listeners()? {
+            reevaluated_listeners += 1;
+            if listener.state == RuntimeListenerState::Failed {
+                continue;
+            }
+            let enforced_reason = local_policy_reason.clone().or_else(|| {
+                let decision = state.explain_local_protocol_policy(&listener.protocol);
+                if decision.allowed {
+                    None
+                } else {
+                    Some(decision.reason)
+                }
+            });
+            if let Some(reason) = enforced_reason {
+                let was_suppressed = listener.state == RuntimeListenerState::Suppressed
+                    && listener.state_reason.as_deref() == Some(reason.as_str());
+                let _ = transport.update_listener_state(
+                    &listener.listener_id,
+                    RuntimeListenerState::Suppressed,
+                    Some(reason.clone()),
+                )?;
+                if !was_suppressed {
+                    suppressed_listeners += 1;
+                    transport.record_runtime_event(
+                        "authority.policy_enforced",
+                        RuntimeEventSubject {
+                            kind: "listener".to_string(),
+                            id: listener.listener_id.clone(),
+                        },
+                        json!({
+                            "listener_id": listener.listener_id,
+                            "protocol": listener.protocol.as_str(),
+                            "action": "suppress_listener",
+                            "reason": reason,
+                            "local_policy_denied": local_policy_denied,
+                            "authority_subject_mismatch": authority_subject_mismatch
+                        }),
+                    )?;
+                }
+            } else if listener.state == RuntimeListenerState::Suppressed {
+                let _ = transport.update_listener_state(
+                    &listener.listener_id,
+                    RuntimeListenerState::Active,
+                    None,
+                )?;
+                restored_listeners += 1;
+            }
+        }
+
         let report = AuthorityReevaluationReport {
             reevaluated_sessions,
             closed_sessions,
             degraded_sessions,
             migrated_sessions,
             unchanged_sessions,
+            reevaluated_listeners,
+            suppressed_listeners,
+            restored_listeners,
             reconnect_suppressions_added,
             reconnect_suppressions_cleared,
             local_policy_denied,
@@ -1813,6 +2020,9 @@ impl LocalControlPlane {
                 "degraded_sessions": report.degraded_sessions,
                 "migrated_sessions": report.migrated_sessions,
                 "unchanged_sessions": report.unchanged_sessions,
+                "reevaluated_listeners": report.reevaluated_listeners,
+                "suppressed_listeners": report.suppressed_listeners,
+                "restored_listeners": report.restored_listeners,
                 "reconnect_suppressions_added": report.reconnect_suppressions_added,
                 "reconnect_suppressions_cleared": report.reconnect_suppressions_cleared,
                 "local_policy_denied": report.local_policy_denied,
@@ -2194,12 +2404,39 @@ fn runtime_session_summary(session: &SessionSnapshot) -> String {
     )
 }
 
+fn runtime_path_decision_reason(explanation: &PathExplanation) -> String {
+    match (
+        explanation.strengths.is_empty(),
+        explanation.tradeoffs.is_empty(),
+    ) {
+        (false, false) => format!(
+            "strengths={} tradeoffs={}",
+            explanation.strengths.join("|"),
+            explanation.tradeoffs.join("|")
+        ),
+        (false, true) => format!("strengths={}", explanation.strengths.join("|")),
+        (true, false) => format!("tradeoffs={}", explanation.tradeoffs.join("|")),
+        (true, true) => explanation.summary.clone(),
+    }
+}
+
 fn runtime_class_rank(class: TrafficClass) -> u8 {
     match class {
         TrafficClass::Control => 0,
         TrafficClass::Interactive => 1,
         TrafficClass::Bulk => 2,
         TrafficClass::Background => 3,
+    }
+}
+
+fn runtime_path_state_rank(state: &RuntimePathState) -> u8 {
+    match state {
+        RuntimePathState::Active => 0,
+        RuntimePathState::Migrating => 1,
+        RuntimePathState::Degraded => 2,
+        RuntimePathState::Candidate => 3,
+        RuntimePathState::Suppressed => 4,
+        RuntimePathState::Failed => 5,
     }
 }
 
@@ -3968,11 +4205,16 @@ mod tests {
         let active_paths = control
             .runtime_paths(&transport)
             .expect("runtime paths should render");
-        assert_eq!(active_paths.len(), 1);
-        assert_eq!(active_paths[0].session_id, Some(session.session_id));
-        assert_eq!(active_paths[0].state, RuntimePathState::Active);
-        assert_eq!(active_paths[0].path_kind, Some(PathKind::Relay));
-        assert!(!active_paths[0].summary.is_empty());
+        let active_entry = active_paths
+            .iter()
+            .find(|entry| entry.session_id == Some(session.session_id))
+            .expect("active session path should exist");
+        assert_eq!(active_entry.state, RuntimePathState::Active);
+        assert_eq!(active_entry.path_kind, Some(PathKind::Relay));
+        assert!(!active_entry.summary.is_empty());
+        assert!(active_paths
+            .iter()
+            .any(|entry| entry.state == RuntimePathState::Candidate));
 
         let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
         updated.capability_grants.clear();
@@ -3987,15 +4229,20 @@ mod tests {
         let suppressed_paths = control
             .runtime_paths(&transport)
             .expect("suppressed runtime paths should render");
-        assert_eq!(suppressed_paths.len(), 1);
-        assert_eq!(suppressed_paths[0].session_id, None);
-        assert_eq!(suppressed_paths[0].state, RuntimePathState::Suppressed);
-        assert_eq!(suppressed_paths[0].protocol, session.protocol);
-        assert!(suppressed_paths[0]
+        let suppressed_entry = suppressed_paths
+            .iter()
+            .find(|entry| entry.state == RuntimePathState::Suppressed)
+            .expect("suppressed path should exist");
+        assert_eq!(suppressed_entry.session_id, None);
+        assert_eq!(suppressed_entry.protocol, session.protocol);
+        assert!(suppressed_entry
             .state_reason
             .as_deref()
             .unwrap_or_default()
             .contains("no active capability grants"));
+        assert!(suppressed_paths
+            .iter()
+            .any(|entry| entry.state == RuntimePathState::Candidate));
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();
@@ -4037,10 +4284,13 @@ mod tests {
         updated
             .save(&state_path)
             .expect("updated state should persist");
-        control
+        let report = control
             .reevaluate_runtime_authority(&runtime_identity, &transport)
             .await
             .expect("authority reevaluation should succeed");
+        assert_eq!(report.reevaluated_listeners, 1);
+        assert_eq!(report.suppressed_listeners, 1);
+        assert_eq!(report.restored_listeners, 0);
 
         let suppressed = control
             .runtime_health(&transport)
@@ -4057,6 +4307,18 @@ mod tests {
         assert_eq!(suppressed.reconnect_suppression_count, 1);
         assert_eq!(suppressed.authority_subject_status, "matched");
         assert!(suppressed.authority_deny_reason.is_none());
+        assert_eq!(suppressed.active_listeners, 0);
+
+        let listeners = control
+            .runtime_listeners(&transport)
+            .expect("runtime listeners should render");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].state, RuntimeListenerState::Suppressed);
+        assert!(listeners[0]
+            .state_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no active capability grants"));
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();

@@ -16,6 +16,7 @@
         "endpoint_summary": "relay=quic://203.0.113.70:443 destination=203.0.113.71:8443",
         "score": 42,
         "state_reason": "selected path still matches active session",
+        "decision_reason": "relay preserves continuity while direct remains less preferred for current runtime posture",
         "summary": "Relay routing for ed25519:active-peer via ed25519:relay-peer from AuthorityRelay scores 42 for Control traffic",
         "alternatives": [
           {
@@ -39,7 +40,24 @@
         "endpoint_summary": "relay=ed25519:relay-peer",
         "score": 61,
         "state_reason": "no active capability grants for /quicnet/control/1",
+        "decision_reason": "authority relay remains the best known route even though reconnect is suppressed by policy",
         "summary": "reconnect suppressed for ed25519:suppressed-peer: Relay routing for ed25519:suppressed-peer via ed25519:relay-peer from AuthorityRelay scores 61 for Interactive traffic",
+        "alternatives": []
+      },
+      {
+        "session_id": null,
+        "peer_id": "ed25519:candidate-peer",
+        "protocol": null,
+        "class": "interactive",
+        "state": "candidate",
+        "path_class": "direct",
+        "source": "observed",
+        "relay_peer_id": null,
+        "endpoint_summary": "direct",
+        "score": 77,
+        "state_reason": "known candidate path is not currently active",
+        "decision_reason": "direct path currently scores highest for interactive traffic based on observed reachability and latency",
+        "summary": "candidate path available for ed25519:candidate-peer: DirectIpv6 routing for ed25519:candidate-peer via direct from Observed scores 77 for Interactive traffic",
         "alternatives": []
       }
     ]

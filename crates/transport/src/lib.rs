@@ -145,6 +145,7 @@ pub struct ReconnectSuppression {
 pub enum RuntimeListenerState {
     Active,
     Failed,
+    Suppressed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +156,7 @@ pub struct RuntimeListenerSnapshot {
     pub protocol: ProtocolId,
     pub advertise: bool,
     pub state: RuntimeListenerState,
+    pub state_reason: Option<String>,
     pub started_at_unix_secs: u64,
 }
 
@@ -250,6 +252,13 @@ pub trait SessionLifecycleTransport: SecureTransport {
     fn reconnect_suppressions(&self) -> Result<Vec<ReconnectSuppression>, TransportError>;
 
     fn active_listeners(&self) -> Result<Vec<RuntimeListenerSnapshot>, TransportError>;
+
+    fn update_listener_state(
+        &self,
+        listener_id: &str,
+        state: RuntimeListenerState,
+        state_reason: Option<String>,
+    ) -> Result<Option<RuntimeListenerSnapshot>, TransportError>;
 
     fn transport_health(&self) -> Result<RuntimeTransportHealth, TransportError>;
 

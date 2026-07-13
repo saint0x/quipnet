@@ -23,6 +23,7 @@
                   "protocol",
                   "advertise",
                   "state",
+                  "state_reason",
                   "age_seconds"
                 ],
                 "properties": {
@@ -33,7 +34,11 @@
                   "advertise": { "type": "boolean" },
                   "state": {
                     "type": "string",
-                    "enum": ["active", "failed"]
+                    "enum": ["active", "failed", "suppressed"]
+                  },
+                  "state_reason": {
+                    "type": ["string", "null"],
+                    "minLength": 1
                   },
                   "age_seconds": { "type": "integer", "minimum": 0 }
                 }

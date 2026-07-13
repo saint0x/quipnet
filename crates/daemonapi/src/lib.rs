@@ -152,6 +152,9 @@ pub struct AuthoritySyncStatus {
     pub degraded_sessions: usize,
     pub migrated_sessions: usize,
     pub unchanged_sessions: usize,
+    pub reevaluated_listeners: usize,
+    pub suppressed_listeners: usize,
+    pub restored_listeners: usize,
     pub reconnect_suppressions_added: usize,
     pub reconnect_suppressions_cleared: usize,
     pub local_policy_reason: Option<String>,
@@ -184,6 +187,7 @@ pub struct RuntimeListenerEntry {
     pub protocol: String,
     pub advertise: bool,
     pub state: String,
+    pub state_reason: Option<String>,
     pub age_seconds: u64,
 }
 
@@ -206,6 +210,7 @@ pub struct RuntimePathEntry {
     pub endpoint_summary: String,
     pub score: Option<u32>,
     pub state_reason: Option<String>,
+    pub decision_reason: Option<String>,
     pub summary: String,
     pub alternatives: Vec<RuntimePathAlternativeEntry>,
 }
@@ -460,6 +465,7 @@ pub struct SessionReconcileEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn response_envelope_serializes_success() {
@@ -475,5 +481,62 @@ mod tests {
         let value = serde_json::to_value(response).expect("response should serialize");
         assert_eq!(value["ok"], serde_json::json!(true));
         assert_eq!(value["request_id"], serde_json::json!("req-1"));
+    }
+
+    #[test]
+    fn daemon_fixtures_deserialize_and_schemas_expose_new_fields() {
+        let listeners: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/runtime.listeners.list.response.json"
+        ))
+        .expect("listener fixture should deserialize");
+        assert!(listeners.ok);
+
+        let paths: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/runtime.paths.list.response.json"
+        ))
+        .expect("path fixture should deserialize");
+        assert!(paths.ok);
+
+        let identity_show: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/identity.show.response.json"
+        ))
+        .expect("identity show fixture should deserialize");
+        assert!(identity_show.ok);
+
+        let identity_verify: ResponseEnvelope = serde_json::from_str(include_str!(
+            "../../../fixtures/daemon/identity.verify.response.json"
+        ))
+        .expect("identity verify fixture should deserialize");
+        assert!(identity_verify.ok);
+
+        let listener_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/runtime.listeners.list.response.schema.json"
+        ))
+        .expect("listener schema should parse");
+        let listener_state_enum = &listener_schema["allOf"][1]["properties"]["result"]
+            ["properties"]["listeners"]["items"]["properties"]["state"]["enum"];
+        assert!(listener_state_enum
+            .as_array()
+            .expect("listener state enum should be an array")
+            .iter()
+            .any(|value| value == "suppressed"));
+
+        let path_schema: Value = serde_json::from_str(include_str!(
+            "../../../schemas/daemon/runtime.paths.list.response.schema.json"
+        ))
+        .expect("path schema should parse");
+        let path_state_enum = &path_schema["allOf"][1]["properties"]["result"]["properties"]
+            ["paths"]["items"]["properties"]["state"]["enum"];
+        assert!(path_state_enum
+            .as_array()
+            .expect("path state enum should be an array")
+            .iter()
+            .any(|value| value == "candidate"));
+        assert!(
+            path_schema["allOf"][1]["properties"]["result"]["properties"]["paths"]["items"]
+                ["properties"]
+                .get("decision_reason")
+                .is_some()
+        );
     }
 }

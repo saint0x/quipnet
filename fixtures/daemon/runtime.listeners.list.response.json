@@ -10,7 +10,8 @@
         "bind_summary": "protocol=/quicnet/control/1 advertise=true",
         "protocol": "/quicnet/control/1",
         "advertise": true,
-        "state": "active",
+        "state": "suppressed",
+        "state_reason": "no active capability grants for /quicnet/control/1",
         "age_seconds": 3
       }
     ]

@@ -92,6 +92,8 @@ Result should include:
 - transport type
 - bind address summary
 - state
+- state reason when suppressed or failed
+- whether the listener is currently eligible under authority and local policy
 
 ### `runtime.paths.list`
 
@@ -102,6 +104,7 @@ Result should include:
 - peer or session reference
 - active path
 - candidate paths
+- decision reason for the selected or candidate path
 - current health summary
 - migration state when applicable
 

@@ -1600,6 +1600,7 @@ fn runtime_listener_entry(listener: fabric::RuntimeListenerSnapshot) -> RuntimeL
         protocol: listener.protocol.as_str().to_string(),
         advertise: listener.advertise,
         state: runtime_listener_state_label(&listener.state).to_string(),
+        state_reason: listener.state_reason,
         age_seconds: current_unix_secs().saturating_sub(listener.started_at_unix_secs),
     }
 }
@@ -1628,6 +1629,7 @@ fn runtime_path_entry(path: RuntimePathSnapshot) -> RuntimePathEntry {
         endpoint_summary: path.endpoint_summary,
         score: path.score,
         state_reason: path.state_reason,
+        decision_reason: path.decision_reason,
         summary: path.summary,
         alternatives: path
             .alternatives
@@ -1752,6 +1754,7 @@ fn runtime_state_label(state: &fabric::RuntimeSessionState) -> &'static str {
 
 fn runtime_path_state_label(state: &RuntimePathState) -> &'static str {
     match state {
+        RuntimePathState::Candidate => "candidate",
         RuntimePathState::Active => "active",
         RuntimePathState::Degraded => "degraded",
         RuntimePathState::Migrating => "migrating",
@@ -1764,6 +1767,7 @@ fn runtime_listener_state_label(state: &fabric::RuntimeListenerState) -> &'stati
     match state {
         fabric::RuntimeListenerState::Active => "active",
         fabric::RuntimeListenerState::Failed => "failed",
+        fabric::RuntimeListenerState::Suppressed => "suppressed",
     }
 }
 
@@ -1949,12 +1953,15 @@ fn reprobe_summary_line(report: &fabric::NetcheckReprobeReport) -> String {
 
 fn authority_reevaluation_summary_line(report: &fabric::AuthorityReevaluationReport) -> String {
     format!(
-        "reevaluated={} closed={} degraded={} migrated={} unchanged={} suppressed_added={} suppressed_cleared={} local_policy_denied={} subject_mismatch={} local_membership_denied={} peer_membership_denied={} capability_denied={} reason={}",
+        "reevaluated={} closed={} degraded={} migrated={} unchanged={} listeners_reevaluated={} listeners_suppressed={} listeners_restored={} suppressed_added={} suppressed_cleared={} local_policy_denied={} subject_mismatch={} local_membership_denied={} peer_membership_denied={} capability_denied={} reason={}",
         report.reevaluated_sessions,
         report.closed_sessions,
         report.degraded_sessions,
         report.migrated_sessions,
         report.unchanged_sessions,
+        report.reevaluated_listeners,
+        report.suppressed_listeners,
+        report.restored_listeners,
         report.reconnect_suppressions_added,
         report.reconnect_suppressions_cleared,
         report.local_policy_denied,
@@ -1994,6 +2001,9 @@ fn latest_authority_status(
         degraded_sessions: 0,
         migrated_sessions: 0,
         unchanged_sessions: 0,
+        reevaluated_listeners: 0,
+        suppressed_listeners: 0,
+        restored_listeners: 0,
         reconnect_suppressions_added: 0,
         reconnect_suppressions_cleared: 0,
         local_policy_reason: health.authority_deny_reason.clone(),
@@ -2033,6 +2043,21 @@ fn latest_authority_status(
         status.unchanged_sessions = event
             .details
             .get("unchanged_sessions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.reevaluated_listeners = event
+            .details
+            .get("reevaluated_listeners")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.suppressed_listeners = event
+            .details
+            .get("suppressed_listeners")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as usize;
+        status.restored_listeners = event
+            .details
+            .get("restored_listeners")
             .and_then(|value| value.as_u64())
             .unwrap_or(0) as usize;
         status.reconnect_suppressions_added = event

@@ -42,7 +42,7 @@
                   },
                   "state": {
                     "type": "string",
-                    "enum": ["active", "degraded", "migrating", "failed", "suppressed"]
+                    "enum": ["candidate", "active", "degraded", "migrating", "failed", "suppressed"]
                   },
                   "path_class": {
                     "type": "string",
@@ -62,6 +62,10 @@
                     "minimum": 0
                   },
                   "state_reason": {
+                    "type": ["string", "null"],
+                    "minLength": 1
+                  },
+                  "decision_reason": {
                     "type": ["string", "null"],
                     "minLength": 1
                   },
