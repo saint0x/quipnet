@@ -30,6 +30,15 @@
       "times": 1
     },
     {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["run", "-p", "quicnetd", "--", "--one-shot"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
       "type": "proc_spawn",
       "cmd": "cargo",
       "args": ["run", "-p", "quicnet", "--", "status"],

@@ -12,4 +12,5 @@ identity = { path = "../../crates/identity" }
 observability = { path = "../../crates/observability" }
 fabric = { path = "../../crates/fabric" }
 quic = { path = "../../crates/quic" }
+rand.workspace = true
 tokio.workspace = true

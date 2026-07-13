@@ -1021,6 +1021,7 @@ dependencies = [
  "identity",
  "observability",
  "quic",
+ "rand",
  "tokio",
 ]
 
@@ -1129,6 +1130,7 @@ dependencies = [
  "identity",
  "model",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
