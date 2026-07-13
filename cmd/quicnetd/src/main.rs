@@ -71,11 +71,20 @@ struct Args {
 #[derive(Debug)]
 struct DaemonCycleReport {
     trigger: CycleTrigger,
+    preparation: CyclePreparation,
     reprobe_report: Option<fabric::NetcheckReprobeReport>,
     state: fabric::DaemonState,
     reconcile_report: Option<fabric::SessionReconcileReport>,
     active_session: Option<SessionSnapshot>,
     connect_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CyclePreparation {
+    ReloadState,
+    RefreshState,
+    SyncAuthoritySnapshot,
+    ReprobeNetwork,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,12 +246,8 @@ async fn run_cycle(
     control: &LocalControlPlane,
     trigger: CycleTrigger,
 ) -> Result<DaemonCycleReport, fabric::DaemonStateError> {
-    let reprobe_report = if trigger == CycleTrigger::NetworkChangeRequested {
-        Some(control.reprobe_network_change("network change trigger observed")?)
-    } else {
-        None
-    };
-    let mut state = refresh_state(args, control)?;
+    let (preparation, reprobe_report, mut state) =
+        prepare_state_for_trigger(args, control, &trigger)?;
     let reconcile_report = if args.disable_reconcile {
         None
     } else {
@@ -285,6 +290,7 @@ async fn run_cycle(
 
     Ok(DaemonCycleReport {
         trigger,
+        preparation,
         reprobe_report,
         state,
         reconcile_report,
@@ -377,7 +383,7 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
         .map(|decision| decision.explanation.summary)
         .unwrap_or_else(|| "no routing candidates".to_string());
     println!(
-        "quicnetd active: {} selected_path={} active_session={} reprobe={} reconcile={} connect={} trigger={} state_path={}",
+        "quicnetd active: {} selected_path={} active_session={} preparation={} reprobe={} reconcile={} connect={} trigger={} state_path={}",
         report.state.status_line(),
         selected_path,
         report
@@ -385,6 +391,7 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
             .as_ref()
             .map(|session| format!("{}@{}", hex_session_id(&session.session_id), session.peer))
             .unwrap_or_else(|| "none".to_string()),
+        cycle_preparation_label(&report.preparation),
         report
             .reprobe_report
             .as_ref()
@@ -413,6 +420,50 @@ fn parse_class(value: &str) -> TrafficClass {
 fn daemon_transport(args: &Args) -> QuicTransportAdapter {
     let identity = load_or_init_identity(&args.identity_path, &args.identity_passphrase_env);
     QuicTransportAdapter::with_identity(fabric::NetworkId::derive(&args.network), identity)
+}
+
+fn prepare_state_for_trigger(
+    args: &Args,
+    control: &LocalControlPlane,
+    trigger: &CycleTrigger,
+) -> Result<
+    (
+        CyclePreparation,
+        Option<fabric::NetcheckReprobeReport>,
+        fabric::DaemonState,
+    ),
+    fabric::DaemonStateError,
+> {
+    match trigger {
+        CycleTrigger::StateChanged => {
+            Ok((CyclePreparation::ReloadState, None, control.ensure_state()?))
+        }
+        CycleTrigger::AuthoritySnapshotChanged => {
+            let state = if let Some(path) = args.authority_snapshot.as_deref() {
+                control
+                    .sync_authority_snapshot(path)
+                    .map(|(state, _)| state)?
+            } else {
+                control.ensure_state()?
+            };
+            Ok((CyclePreparation::SyncAuthoritySnapshot, None, state))
+        }
+        CycleTrigger::NetworkChangeRequested => {
+            let reprobe_report =
+                control.reprobe_network_change("network change trigger observed")?;
+            let state = control.ensure_state()?;
+            Ok((
+                CyclePreparation::ReprobeNetwork,
+                Some(reprobe_report),
+                state,
+            ))
+        }
+        CycleTrigger::Startup | CycleTrigger::IntervalElapsed => Ok((
+            CyclePreparation::RefreshState,
+            None,
+            refresh_state(args, control)?,
+        )),
+    }
 }
 
 async fn wait_for_next_cycle(
@@ -459,6 +510,15 @@ fn cycle_trigger_label(trigger: &CycleTrigger) -> &'static str {
         CycleTrigger::StateChanged => "state-changed",
         CycleTrigger::AuthoritySnapshotChanged => "authority-snapshot-changed",
         CycleTrigger::NetworkChangeRequested => "network-change",
+    }
+}
+
+fn cycle_preparation_label(preparation: &CyclePreparation) -> &'static str {
+    match preparation {
+        CyclePreparation::ReloadState => "reload",
+        CyclePreparation::RefreshState => "refresh",
+        CyclePreparation::SyncAuthoritySnapshot => "sync-authority-snapshot",
+        CyclePreparation::ReprobeNetwork => "reprobe-network",
     }
 }
 
@@ -584,6 +644,47 @@ fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepare_state_for_trigger_reloads_existing_state_for_state_change() {
+        let state_path = unique_temp_path("quicnetd-prepare-state-change");
+        let control =
+            LocalControlPlane::new(DaemonConfig::new("prepare-state-change", &state_path));
+        let state = fabric::fixture_daemon_state("prepare-state-change");
+        state.save(&state_path).expect("state should persist");
+        let args = test_args(state_path.to_string_lossy().as_ref());
+
+        let (preparation, reprobe_report, prepared_state) =
+            prepare_state_for_trigger(&args, &control, &CycleTrigger::StateChanged)
+                .expect("state change preparation should succeed");
+
+        assert_eq!(preparation, CyclePreparation::ReloadState);
+        assert!(reprobe_report.is_none());
+        assert_eq!(prepared_state.network, "prepare-state-change");
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn prepare_state_for_trigger_reprobes_before_network_change_cycle() {
+        let state_path = unique_temp_path("quicnetd-prepare-network-change");
+        let control =
+            LocalControlPlane::new(DaemonConfig::new("prepare-network-change", &state_path));
+        let mut state = fabric::fixture_daemon_state("prepare-network-change");
+        state.netcheck.udp_reachable = false;
+        state.netcheck.public_udp_addr = Some("203.0.113.120:8443".to_string());
+        state.save(&state_path).expect("state should persist");
+        let mut args = test_args(state_path.to_string_lossy().as_ref());
+        args.force_network_reprobe = true;
+
+        let (preparation, reprobe_report, prepared_state) =
+            prepare_state_for_trigger(&args, &control, &CycleTrigger::NetworkChangeRequested)
+                .expect("network change preparation should succeed");
+
+        assert_eq!(preparation, CyclePreparation::ReprobeNetwork);
+        assert!(reprobe_report.is_some());
+        assert!(prepared_state.netcheck.udp_reachable);
+        let _ = std::fs::remove_file(state_path);
+    }
 
     #[test]
     fn trigger_monitor_detects_state_change() {
