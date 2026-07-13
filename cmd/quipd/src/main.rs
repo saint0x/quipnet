@@ -3133,6 +3133,70 @@ mod tests {
     }
 
     #[test]
+    fn runtime_paths_response_reports_failed_reconnect_diagnostics() {
+        let state_path = unique_temp_path("quipd-runtime-paths-failed-reconnect");
+        let state = fabric::fixture_daemon_state("quipd-runtime-paths-failed-reconnect");
+        let peer = state
+            .first_peer()
+            .map(|entry| entry.snapshot.peer.clone())
+            .expect("fixture peer should exist");
+        state
+            .save(&state_path)
+            .expect("fixture state should persist");
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol should parse");
+        let transport = QuicTransportAdapter::default();
+        for _ in 0..3 {
+            transport
+                .schedule_reconnect(
+                    &peer,
+                    Some(&protocol),
+                    TrafficClass::Interactive,
+                    "dial rejected by runtime".to_string(),
+                    3,
+                    2,
+                    8,
+                )
+                .expect("reconnect attempt should record");
+        }
+        let control = LocalControlPlane::new(DaemonConfig::new(
+            "quipd-runtime-paths-failed-reconnect",
+            &state_path,
+        ));
+
+        let response = runtime_paths_response(
+            &control,
+            &transport,
+            RequestEnvelope {
+                request_id: "req-runtime-paths".to_string(),
+                operation: "runtime.paths.list".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: RuntimePathsListResult =
+            serde_json::from_value(response.result.expect("paths result should exist"))
+                .expect("paths result should deserialize");
+        let failed_entry = result
+            .paths
+            .iter()
+            .find(|entry| entry.peer_id == peer.to_string() && entry.state == "failed")
+            .expect("failed reconnect path should be present");
+        assert!(failed_entry.summary.contains("3/3 attempts"));
+        assert!(failed_entry
+            .state_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("reconnect exhausted 3/3 attempts"));
+        assert!(failed_entry.decision_reason.is_some());
+
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[test]
     fn runtime_health_response_preserves_authority_status_fields() {
         let state_path = unique_temp_path("quipd-runtime-health");
         let control = LocalControlPlane::new(DaemonConfig::new("runtime-health", &state_path));

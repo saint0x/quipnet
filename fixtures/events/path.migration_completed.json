@@ -1,0 +1,16 @@
+{
+  "event_id": "evt-1720000123000000005",
+  "event_type": "path.migration_completed",
+  "emitted_at": "2026-07-13T07:54:34Z",
+  "truth_kind": "runtime",
+  "subject": {
+    "kind": "session",
+    "id": "9f10f8e8f34137b1eecce5e7ab9e843a"
+  },
+  "details": {
+    "peer_id": "ed25519:active-peer",
+    "prior_path_class": "relay",
+    "next_path_class": "direct",
+    "reason": "direct path recovered and runtime migration completed"
+  }
+}

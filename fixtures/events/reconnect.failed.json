@@ -1,0 +1,20 @@
+{
+  "event_id": "evt-1720000123000000004",
+  "event_type": "reconnect.failed",
+  "emitted_at": "2026-07-13T07:54:33Z",
+  "truth_kind": "runtime",
+  "subject": {
+    "kind": "peer",
+    "id": "ed25519:reconnect-peer"
+  },
+  "details": {
+    "protocol": "/quicnet/control/1",
+    "class": "interactive",
+    "state": "failed",
+    "attempt_count": 5,
+    "next_attempt_unix_secs": 1720000127,
+    "backoff_secs": 8,
+    "max_attempts": 5,
+    "reason": "relay dial rejected"
+  }
+}

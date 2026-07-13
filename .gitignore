@@ -5,6 +5,7 @@ target/
 *.fozzy
 !verification/fozzy/authority-reevaluation.trace.fozzy
 !verification/fozzy/backup-restore-smoke.trace.fozzy
+!verification/fozzy/relay-migration-smoke.trace.fozzy
 !verification/fozzy/restart-smoke.trace.fozzy
 coverage/
 artifacts/

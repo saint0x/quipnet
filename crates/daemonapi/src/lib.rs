@@ -678,6 +678,16 @@ mod tests {
             .expect("event type enum should be an array")
             .iter()
             .any(|value| value == "reconnect.unsuppressed"));
+        assert!(event_type_enum
+            .as_array()
+            .expect("event type enum should be an array")
+            .iter()
+            .any(|value| value == "reconnect.failed"));
+        assert!(event_type_enum
+            .as_array()
+            .expect("event type enum should be an array")
+            .iter()
+            .any(|value| value == "path.migration_completed"));
         let event_subject_enum = &events_schema["allOf"][1]["properties"]["result"]["properties"]
             ["events"]["items"]["properties"]["subject_kind"]["enum"];
         assert!(event_subject_enum

@@ -1969,21 +1969,8 @@ impl LocalControlPlane {
             let candidates = state.path_candidates_for(&attempt.peer);
             let selected = select_best_path(&candidates, attempt.class);
             let selected_candidate = selected.as_ref().map(|decision| &decision.selected);
-            let (state_kind, state_reason, summary) = match attempt.state {
-                RuntimeReconnectAttemptState::BackingOff => (
-                    RuntimePathState::Candidate,
-                    Some(attempt.reason.clone()),
-                    format!(
-                        "reconnect backing off for {} until {}",
-                        attempt.peer, attempt.next_attempt_unix_secs
-                    ),
-                ),
-                RuntimeReconnectAttemptState::Failed => (
-                    RuntimePathState::Failed,
-                    Some(attempt.reason.clone()),
-                    format!("reconnect failed for {}", attempt.peer),
-                ),
-            };
+            let (state_kind, state_reason, summary) =
+                runtime_reconnect_path_status(&attempt, selected.as_ref());
             snapshots.push(RuntimePathSnapshot {
                 session_id: None,
                 peer: attempt.peer.clone(),
@@ -2871,6 +2858,56 @@ fn runtime_session_summary(session: &SessionSnapshot) -> String {
         session.peer,
         runtime_session_endpoint_summary(session)
     )
+}
+
+fn runtime_reconnect_path_status(
+    attempt: &RuntimeReconnectAttempt,
+    selected: Option<&PathDecision>,
+) -> (RuntimePathState, Option<String>, String) {
+    let selected_summary = selected
+        .map(|decision| decision.explanation.summary.clone())
+        .unwrap_or_else(|| "no known runtime candidate path remains".to_string());
+    let fallback_summary = selected
+        .map(|decision| match decision.selected.path_kind {
+            PathKind::Relay => {
+                format!(
+                    "best known relay fallback remains {}",
+                    decision.explanation.summary
+                )
+            }
+            _ => format!(
+                "best known direct path remains {}",
+                decision.explanation.summary
+            ),
+        })
+        .unwrap_or_else(|| "no known runtime candidate path remains".to_string());
+    match attempt.state {
+        RuntimeReconnectAttemptState::BackingOff => (
+            RuntimePathState::Candidate,
+            Some(format!(
+                "attempt {}/{} backing off until {} because {}",
+                attempt.attempt_count,
+                attempt.max_attempts,
+                attempt.next_attempt_unix_secs,
+                attempt.reason
+            )),
+            format!(
+                "reconnect backing off for {} after {}/{} attempts; {}",
+                attempt.peer, attempt.attempt_count, attempt.max_attempts, selected_summary
+            ),
+        ),
+        RuntimeReconnectAttemptState::Failed => (
+            RuntimePathState::Failed,
+            Some(format!(
+                "reconnect exhausted {}/{} attempts because {}",
+                attempt.attempt_count, attempt.max_attempts, attempt.reason
+            )),
+            format!(
+                "reconnect failed for {} after {}/{} attempts; {}",
+                attempt.peer, attempt.attempt_count, attempt.max_attempts, fallback_summary
+            ),
+        ),
+    }
 }
 
 fn runtime_path_decision_reason(explanation: &PathExplanation) -> String {
@@ -4829,6 +4866,102 @@ mod tests {
         assert!(suppressed_paths
             .iter()
             .any(|entry| entry.state == RuntimePathState::Candidate));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn runtime_paths_report_failed_reconnect_with_operator_diagnostics() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quipnet-runtime-paths-failed-reconnect");
+        let (_control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "runtime-paths-failed-reconnect-prod",
+            &state_path,
+            120,
+            121,
+            b"runtime-paths-failed-reconnect-runtime",
+            b"runtime-paths-failed-reconnect-target",
+        )
+        .await;
+
+        transport
+            .close_session(&session)
+            .await
+            .expect("runtime session should close");
+        let protocol = session.protocol.clone().expect("protocol should exist");
+        transport
+            .schedule_reconnect(
+                &session.peer,
+                Some(&protocol),
+                session.class,
+                "relay dial rejected by runtime".to_string(),
+                3,
+                2,
+                8,
+            )
+            .expect("first reconnect attempt should schedule");
+        transport
+            .schedule_reconnect(
+                &session.peer,
+                Some(&protocol),
+                session.class,
+                "relay dial rejected by runtime".to_string(),
+                3,
+                2,
+                8,
+            )
+            .expect("second reconnect attempt should schedule");
+        transport
+            .schedule_reconnect(
+                &session.peer,
+                Some(&protocol),
+                session.class,
+                "relay dial rejected by runtime".to_string(),
+                3,
+                2,
+                8,
+            )
+            .expect("third reconnect attempt should fail");
+
+        let control = LocalControlPlane::new(DaemonConfig::new(
+            "runtime-paths-failed-reconnect-prod",
+            &state_path,
+        ));
+        let paths = control
+            .runtime_paths(&transport)
+            .expect("runtime paths should render");
+        let failed_entry = paths
+            .iter()
+            .find(|entry| {
+                entry.peer == session.peer
+                    && entry.protocol.as_ref() == Some(&protocol)
+                    && entry.state == RuntimePathState::Failed
+            })
+            .expect("failed reconnect path should exist");
+
+        assert_eq!(failed_entry.path_kind, Some(PathKind::Relay));
+        assert_eq!(failed_entry.relay_peer, Some(relay_peer.clone()));
+        assert!(failed_entry
+            .state_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("reconnect exhausted 3/3 attempts"));
+        assert!(failed_entry.summary.contains("reconnect failed"));
+        assert!(failed_entry.summary.contains("3/3 attempts"));
+        assert!(failed_entry
+            .summary
+            .contains("best known relay fallback remains"));
+        assert!(failed_entry
+            .decision_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("strengths="));
+
+        let events = transport.recent_events(32).expect("events should load");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "reconnect.failed"));
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();

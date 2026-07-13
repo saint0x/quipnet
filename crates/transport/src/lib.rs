@@ -343,7 +343,7 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn runtime_event_fixtures_and_schema_cover_reconnect_transitions() {
+    fn runtime_event_fixtures_and_schema_cover_runtime_path_and_reconnect_transitions() {
         let retry: RuntimeEvent = serde_json::from_str(include_str!(
             "../../../fixtures/events/reconnect.retry_scheduled.json"
         ))
@@ -377,6 +377,33 @@ mod tests {
             Some("backing_off")
         );
 
+        let failed: RuntimeEvent = serde_json::from_str(include_str!(
+            "../../../fixtures/events/reconnect.failed.json"
+        ))
+        .expect("failed fixture should deserialize");
+        assert_eq!(failed.event_type, "reconnect.failed");
+        assert_eq!(
+            failed
+                .details
+                .get("attempt_count")
+                .and_then(|value| value.as_u64()),
+            Some(5)
+        );
+
+        let migrated: RuntimeEvent = serde_json::from_str(include_str!(
+            "../../../fixtures/events/path.migration_completed.json"
+        ))
+        .expect("migration fixture should deserialize");
+        assert_eq!(migrated.event_type, "path.migration_completed");
+        assert_eq!(migrated.subject.kind, "session");
+        assert_eq!(
+            migrated
+                .details
+                .get("next_path_class")
+                .and_then(|value| value.as_str()),
+            Some("direct")
+        );
+
         let schema: Value = serde_json::from_str(include_str!(
             "../../../schemas/events/runtime-event.schema.json"
         ))
@@ -392,6 +419,16 @@ mod tests {
             .expect("event type enum should be an array")
             .iter()
             .any(|value| value == "reconnect.cleared"));
+        assert!(event_type_enum
+            .as_array()
+            .expect("event type enum should be an array")
+            .iter()
+            .any(|value| value == "reconnect.failed"));
+        assert!(event_type_enum
+            .as_array()
+            .expect("event type enum should be an array")
+            .iter()
+            .any(|value| value == "path.migration_completed"));
         let subject_kind_enum = &schema["properties"]["subject"]["properties"]["kind"]["enum"];
         assert!(subject_kind_enum
             .as_array()

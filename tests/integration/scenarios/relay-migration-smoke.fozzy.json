@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "name": "reconnect-smoke",
+  "name": "relay-migration-smoke",
   "steps": [
     {
       "type": "proc_when",
       "cmd": "cargo",
-      "args": ["test", "-p", "quic", "adapter_tracks_reconnect_attempt_backoff_and_clear"],
+      "args": ["test", "-p", "fabric", "relay_map_synthesizes_fallback_for_bootstrap_peer_when_direct_udp_is_unavailable"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",
@@ -14,7 +14,52 @@
     {
       "type": "proc_when",
       "cmd": "cargo",
-      "args": ["test", "-p", "quic", "adapter_emits_unsuppressed_event_when_reconnect_suppression_clears"],
+      "args": ["test", "-p", "fabric", "relay_fallback_builds_relay_route_plan"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quic", "adapter_migrates_relay_session_to_direct_and_releases_old_transport"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "reconcile_sessions_upgrades_relay_session_to_direct"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "authority_reevaluation_migrates_session_when_a_better_eligible_path_emerges"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "fabric", "runtime_paths_report_failed_reconnect_with_operator_diagnostics"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quipd", "runtime_paths_response_reports_failed_reconnect_diagnostics"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",
@@ -24,51 +69,6 @@
       "type": "proc_when",
       "cmd": "cargo",
       "args": ["test", "-p", "transport", "runtime_event_fixtures_and_schema_cover_runtime_path_and_reconnect_transitions"],
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "",
-      "times": 1
-    },
-    {
-      "type": "proc_when",
-      "cmd": "cargo",
-      "args": ["test", "-p", "fabric", "runtime_health_reports_listener_and_suppression_state"],
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "",
-      "times": 1
-    },
-    {
-      "type": "proc_when",
-      "cmd": "cargo",
-      "args": ["test", "-p", "quipd", "runtime_events_response_preserves_event_truth_and_listener_subjects"],
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "",
-      "times": 1
-    },
-    {
-      "type": "proc_when",
-      "cmd": "cargo",
-      "args": ["test", "-p", "daemonapi", "daemon_fixtures_deserialize_and_schemas_expose_new_fields"],
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "",
-      "times": 1
-    },
-    {
-      "type": "proc_when",
-      "cmd": "cargo",
-      "args": ["run", "-p", "quip", "--", "runtime", "health"],
-      "exit_code": 0,
-      "stdout": "",
-      "stderr": "",
-      "times": 1
-    },
-    {
-      "type": "proc_when",
-      "cmd": "cargo",
-      "args": ["run", "-p", "quip", "--", "runtime", "events", "--limit", "8"],
       "exit_code": 0,
       "stdout": "",
       "stderr": "",
