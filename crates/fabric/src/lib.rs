@@ -124,8 +124,10 @@ pub struct DaemonState {
 pub struct StateSyncReport {
     pub membership_changed: bool,
     pub grants_added: usize,
+    pub grants_removed: usize,
     pub revocations_added: usize,
     pub bootstrap_hints_added: usize,
+    pub bootstrap_hints_removed: usize,
     pub relay_announcements_added: usize,
 }
 
@@ -563,8 +565,10 @@ impl DaemonState {
             StateSyncReport {
                 membership_changed: delta.membership_changed,
                 grants_added: delta.grants_added,
+                grants_removed: delta.grants_removed,
                 revocations_added: delta.revocations_added,
                 bootstrap_hints_added: delta.bootstrap_hints_added,
+                bootstrap_hints_removed: delta.bootstrap_hints_removed,
                 relay_announcements_added: 0,
             },
         ))
@@ -993,8 +997,10 @@ impl LocalControlPlane {
             let report = StateSyncReport {
                 membership_changed: true,
                 grants_added: state.capability_grants.len(),
+                grants_removed: 0,
                 revocations_added: state.revocations.len(),
                 bootstrap_hints_added: state.bootstrap.len(),
+                bootstrap_hints_removed: 0,
                 relay_announcements_added: 0,
             };
             state.save(&self.config.state_path)?;
@@ -1057,8 +1063,10 @@ impl LocalControlPlane {
             let report = StateSyncReport {
                 membership_changed: true,
                 grants_added: state.capability_grants.len(),
+                grants_removed: 0,
                 revocations_added: state.revocations.len(),
                 bootstrap_hints_added: state.bootstrap.len(),
+                bootstrap_hints_removed: 0,
                 relay_announcements_added,
             };
             state.save(&self.config.state_path)?;
@@ -1070,6 +1078,8 @@ impl LocalControlPlane {
         Ok((
             state,
             StateSyncReport {
+                grants_removed: report.grants_removed,
+                bootstrap_hints_removed: report.bootstrap_hints_removed,
                 relay_announcements_added,
                 ..report
             },

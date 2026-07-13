@@ -6,9 +6,12 @@ use std::time::{Duration, SystemTime};
 use clap::Parser;
 use crypto::IdentityKeypair;
 use daemonapi::{
-    AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus, ErrorCode, IdentityStatus,
-    RequestEnvelope, ResponseEnvelope, RuntimeEventEntry, RuntimeEventsListResult,
-    RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
+    AuthorityCapabilitiesResult, AuthorityCapabilityGrantEntry, AuthorityMembershipResult,
+    AuthorityRevocationEntry, AuthorityRevocationsResult, AuthorityShowResult,
+    AuthoritySyncOriginPayload, AuthoritySyncResult, AuthoritySyncRevocationsOriginPayload,
+    AuthoritySyncSnapshotPayload, AuthoritySyncStatus, DaemonEndpointDiscovery, DurableStateStatus,
+    ErrorCode, IdentityStatus, RequestEnvelope, ResponseEnvelope, RuntimeEventEntry,
+    RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
     RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult, RuntimeSessionEntry,
     RuntimeSessionsListResult, RuntimeStatusResult, RuntimeSummary, SessionClosePayload,
     SessionCloseResult, SessionConnectPayload, SessionConnectResult, SessionConnectSummary,
@@ -760,6 +763,33 @@ fn route_control_request(
         "runtime.paths.list" => runtime_paths_response(control, transport, envelope),
         "runtime.health" => runtime_health_response(control, transport, envelope),
         "runtime.events.list" => runtime_events_response(control, transport, envelope),
+        "authority.show" => authority_show_response(args, control, transport, envelope),
+        "authority.membership" => authority_membership_response(control, envelope),
+        "authority.capabilities" => authority_capabilities_response(control, envelope),
+        "authority.revocations" => authority_revocations_response(control, envelope),
+        "authority.sync_snapshot" => runtime.block_on(authority_sync_snapshot_response(
+            args,
+            control,
+            transport,
+            local_identity,
+            envelope,
+        )),
+        "authority.sync_origin" => runtime.block_on(authority_sync_origin_response(
+            args,
+            control,
+            transport,
+            local_identity,
+            envelope,
+        )),
+        "authority.sync_revocations_origin" => {
+            runtime.block_on(authority_sync_revocations_origin_response(
+                args,
+                control,
+                transport,
+                local_identity,
+                envelope,
+            ))
+        }
         "session.connect" => runtime.block_on(session_connect_response(
             control,
             transport,
@@ -836,14 +866,12 @@ fn runtime_status_response(
     local_identity: &IdentityKeypair,
     envelope: RequestEnvelope,
 ) -> ResponseEnvelope {
-    match control
-        .ensure_identity_bound_state(local_identity)
-        .and_then(|_| {
-            let state = control.sync_runtime_sessions(transport)?;
-            let health = control.runtime_health(transport)?;
-            let authority = latest_authority_status(transport, &state, &health)?;
-            Ok((state, health, authority))
-        }) {
+    match (|| {
+        let state = control.sync_runtime_sessions(transport)?;
+        let health = control.runtime_health(transport)?;
+        let authority = latest_authority_status(transport, &state, &health)?;
+        Ok((state, health, authority))
+    })() {
         Ok((state, health, authority)) => ResponseEnvelope::success(
             envelope.request_id,
             RuntimeStatusResult {
@@ -926,6 +954,133 @@ fn runtime_events_response(
     }
 }
 
+fn authority_show_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match (|| {
+        let state = control.sync_runtime_sessions(transport)?;
+        let health = control.runtime_health(transport)?;
+        let authority = latest_authority_status(transport, &state, &health)?;
+        Ok((state, authority))
+    })() {
+        Ok((state, authority)) => ResponseEnvelope::success(
+            envelope.request_id,
+            AuthorityShowResult {
+                truth_kind: "runtime".to_string(),
+                configured_origin: args.authority_origin.clone(),
+                configured_subject: args.authority_subject.clone(),
+                configured_snapshot: args.authority_snapshot.clone(),
+                network: state.network.clone(),
+                local_peer_id: state.local_peer_id.to_string(),
+                membership_subject_peer_id: state.membership.subject_peer_id.to_string(),
+                membership_issuer_peer_id: state.membership.issuer_peer_id.to_string(),
+                membership_roles: state.membership.roles.clone(),
+                grants: state.capability_grants.len(),
+                revocations: state.revocations.len(),
+                denied_peers: state.denied_peers.len(),
+                bootstrap_hints: state.bootstrap.len(),
+                relays: state.relay_count(),
+                schema_version: state.schema_version,
+                authority,
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn authority_membership_response(
+    control: &LocalControlPlane,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.ensure_state() {
+        Ok(state) => ResponseEnvelope::success(
+            envelope.request_id,
+            AuthorityMembershipResult {
+                truth_kind: "runtime".to_string(),
+                network: state.network.clone(),
+                subject_peer_id: state.membership.subject_peer_id.to_string(),
+                issuer_peer_id: state.membership.issuer_peer_id.to_string(),
+                issued_at: state.membership.issued_at,
+                expires_at: state.membership.expires_at,
+                roles: state.membership.roles.clone(),
+                schema_version: state.schema_version,
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn authority_capabilities_response(
+    control: &LocalControlPlane,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.ensure_state() {
+        Ok(state) => ResponseEnvelope::success(
+            envelope.request_id,
+            AuthorityCapabilitiesResult {
+                truth_kind: "runtime".to_string(),
+                network: state.network.clone(),
+                subject_peer_id: state.local_peer_id.to_string(),
+                schema_version: state.schema_version,
+                grants: state
+                    .grants_for_peer(&state.local_peer_id)
+                    .into_iter()
+                    .map(|grant| AuthorityCapabilityGrantEntry {
+                        subject_peer_id: grant.subject_peer_id.to_string(),
+                        issuer_peer_id: grant.issuer_peer_id.to_string(),
+                        sequence: grant.sequence,
+                        not_before: grant.not_before,
+                        expires_at: grant.expires_at,
+                        capabilities: grant.capabilities.clone(),
+                        protocols: grant
+                            .protocol_scopes
+                            .iter()
+                            .map(|protocol| protocol.as_str().to_string())
+                            .collect(),
+                        bandwidth_bps: grant.resource_limits.bandwidth_bps,
+                        concurrent_streams: grant.resource_limits.concurrent_streams,
+                        max_object_bytes: grant.resource_limits.max_object_bytes,
+                        constraints: grant.constraints.clone(),
+                    })
+                    .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
+fn authority_revocations_response(
+    control: &LocalControlPlane,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    match control.ensure_state() {
+        Ok(state) => ResponseEnvelope::success(
+            envelope.request_id,
+            AuthorityRevocationsResult {
+                truth_kind: "runtime".to_string(),
+                network: state.network.clone(),
+                schema_version: state.schema_version,
+                revocations: state
+                    .revocations
+                    .iter()
+                    .map(|revocation| AuthorityRevocationEntry {
+                        sequence: revocation.sequence,
+                        issuer_peer_id: revocation.issuer_peer_id.to_string(),
+                        effective_at: revocation.effective_at,
+                        reason: render_revocation_reason(&revocation.reason).to_string(),
+                        target: render_revocation_target(&revocation.target),
+                        note: revocation.note.clone(),
+                    })
+                    .collect(),
+            },
+        ),
+        Err(error) => daemon_error_response(envelope.request_id, &error),
+    }
+}
+
 fn runtime_listeners_response(
     control: &LocalControlPlane,
     transport: &QuicTransportAdapter,
@@ -997,6 +1152,131 @@ fn runtime_health_response(
         ),
         Err(error) => daemon_error_response(envelope.request_id, &error),
     }
+}
+
+async fn authority_sync_snapshot_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload =
+        match serde_json::from_value::<AuthoritySyncSnapshotPayload>(envelope.payload.clone()) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return ResponseEnvelope::error(
+                    envelope.request_id,
+                    ErrorCode::InvalidRequest,
+                    format!("invalid authority.sync_snapshot payload: {error}"),
+                    None,
+                )
+            }
+        };
+    authority_sync_response(
+        args,
+        control,
+        transport,
+        local_identity,
+        envelope.request_id,
+        "snapshot",
+        Some(payload.authority_snapshot.clone()),
+        None,
+        None,
+        |control| control.sync_authority_snapshot(&payload.authority_snapshot),
+    )
+    .await
+}
+
+async fn authority_sync_origin_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload =
+        match serde_json::from_value::<AuthoritySyncOriginPayload>(envelope.payload.clone()) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return ResponseEnvelope::error(
+                    envelope.request_id,
+                    ErrorCode::InvalidRequest,
+                    format!("invalid authority.sync_origin payload: {error}"),
+                    None,
+                )
+            }
+        };
+    authority_sync_response(
+        args,
+        control,
+        transport,
+        local_identity,
+        envelope.request_id,
+        "origin",
+        None,
+        Some(payload.authority_origin.clone()),
+        payload.authority_subject.clone(),
+        |control| {
+            control.sync_authority_origin(
+                &payload.authority_origin,
+                payload.authority_subject.as_deref(),
+            )
+        },
+    )
+    .await
+}
+
+async fn authority_sync_revocations_origin_response(
+    args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    envelope: RequestEnvelope,
+) -> ResponseEnvelope {
+    let payload = match serde_json::from_value::<AuthoritySyncRevocationsOriginPayload>(
+        envelope.payload.clone(),
+    ) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return ResponseEnvelope::error(
+                envelope.request_id,
+                ErrorCode::InvalidRequest,
+                format!("invalid authority.sync_revocations_origin payload: {error}"),
+                None,
+            )
+        }
+    };
+    authority_sync_response(
+        args,
+        control,
+        transport,
+        local_identity,
+        envelope.request_id,
+        "revocations_origin",
+        None,
+        Some(payload.authority_origin.clone()),
+        None,
+        |control| {
+            control
+                .sync_authority_revocations_origin(&payload.authority_origin)
+                .map(|(state, revocations_added)| {
+                    (
+                        state,
+                        fabric::StateSyncReport {
+                            membership_changed: false,
+                            grants_added: 0,
+                            grants_removed: 0,
+                            revocations_added,
+                            bootstrap_hints_added: 0,
+                            bootstrap_hints_removed: 0,
+                            relay_announcements_added: 0,
+                        },
+                    )
+                })
+        },
+    )
+    .await
 }
 
 async fn session_connect_response(
@@ -1675,6 +1955,190 @@ fn latest_authority_status(
     Ok(status)
 }
 
+async fn authority_sync_response<F>(
+    _args: &Args,
+    control: &LocalControlPlane,
+    transport: &QuicTransportAdapter,
+    local_identity: &IdentityKeypair,
+    request_id: String,
+    authority_source: &str,
+    authority_snapshot: Option<String>,
+    authority_origin: Option<String>,
+    authority_subject: Option<String>,
+    sync_fn: F,
+) -> ResponseEnvelope
+where
+    F: FnOnce(
+        &LocalControlPlane,
+    )
+        -> Result<(fabric::DaemonState, fabric::StateSyncReport), fabric::DaemonStateError>,
+{
+    let runtime_peer = local_identity.peer_id().to_string();
+    if let Err(error) = transport.record_runtime_event(
+        "authority.sync_started",
+        fabric::RuntimeEventSubject {
+            kind: "authority".to_string(),
+            id: runtime_peer.clone(),
+        },
+        json!({
+            "authority_source": authority_source,
+            "authority_origin": authority_origin,
+            "authority_subject": authority_subject,
+            "authority_snapshot": authority_snapshot
+        }),
+    ) {
+        return daemon_error_response(request_id, &error.into());
+    }
+
+    let sync = sync_fn(control);
+    let (state, report) = match sync {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = transport.record_runtime_event(
+                "authority.sync_failed",
+                fabric::RuntimeEventSubject {
+                    kind: "authority".to_string(),
+                    id: runtime_peer,
+                },
+                json!({
+                    "authority_source": authority_source,
+                    "authority_origin": authority_origin,
+                    "authority_subject": authority_subject,
+                    "authority_snapshot": authority_snapshot,
+                    "error": error.to_string()
+                }),
+            );
+            return daemon_error_response(request_id, &error);
+        }
+    };
+
+    let reevaluated = if state_sync_requires_reevaluation(&report) {
+        match control
+            .reevaluate_runtime_authority(local_identity, transport)
+            .await
+        {
+            Ok(report) => Some(report),
+            Err(error) => {
+                let _ = transport.record_runtime_event(
+                    "authority.sync_failed",
+                    fabric::RuntimeEventSubject {
+                        kind: "authority".to_string(),
+                        id: runtime_peer,
+                    },
+                    json!({
+                        "authority_source": authority_source,
+                        "authority_origin": authority_origin,
+                        "authority_subject": authority_subject,
+                        "authority_snapshot": authority_snapshot,
+                        "error": error.to_string(),
+                        "phase": "reevaluation"
+                    }),
+                );
+                return daemon_error_response(request_id, &error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let health = match control.runtime_health(transport) {
+        Ok(health) => health,
+        Err(error) => return daemon_error_response(request_id, &error),
+    };
+    let authority = match latest_authority_status(transport, &state, &health) {
+        Ok(authority) => authority,
+        Err(error) => return daemon_error_response(request_id, &error),
+    };
+
+    if let Err(error) = transport.record_runtime_event(
+            "authority.sync_completed",
+        fabric::RuntimeEventSubject {
+            kind: "authority".to_string(),
+            id: runtime_peer,
+        },
+        json!({
+            "authority_source": authority_source,
+            "authority_origin": authority_origin,
+            "authority_subject": authority_subject,
+            "authority_snapshot": authority_snapshot,
+            "membership_changed": report.membership_changed,
+            "grants_added": report.grants_added,
+            "grants_removed": report.grants_removed,
+            "revocations_added": report.revocations_added,
+            "bootstrap_hints_added": report.bootstrap_hints_added,
+            "bootstrap_hints_removed": report.bootstrap_hints_removed,
+            "relay_announcements_added": report.relay_announcements_added,
+            "reevaluation_triggered": reevaluated.is_some()
+        }),
+    ) {
+        return daemon_error_response(request_id, &error.into());
+    }
+
+    ResponseEnvelope::success(
+        request_id,
+        AuthoritySyncResult {
+            truth_kind: "runtime".to_string(),
+            authority_source: authority_source.to_string(),
+            authority_origin,
+            authority_subject,
+            authority_snapshot,
+            network: state.network.clone(),
+            local_peer_id: state.local_peer_id.to_string(),
+            grants_added: report.grants_added,
+            grants_removed: report.grants_removed,
+            revocations_added: report.revocations_added,
+            bootstrap_hints_added: report.bootstrap_hints_added,
+            bootstrap_hints_removed: report.bootstrap_hints_removed,
+            relay_announcements_added: report.relay_announcements_added,
+            membership_changed: report.membership_changed,
+            authority,
+        },
+    )
+}
+
+fn state_sync_requires_reevaluation(report: &fabric::StateSyncReport) -> bool {
+    report.membership_changed
+        || report.grants_added > 0
+        || report.grants_removed > 0
+        || report.revocations_added > 0
+        || report.bootstrap_hints_added > 0
+        || report.bootstrap_hints_removed > 0
+        || report.relay_announcements_added > 0
+}
+
+fn render_revocation_reason(reason: &membership::RevocationReason) -> &'static str {
+    match reason {
+        membership::RevocationReason::Administrative => "administrative",
+        membership::RevocationReason::KeyCompromise => "key_compromise",
+        membership::RevocationReason::Superseded => "superseded",
+        membership::RevocationReason::Unspecified => "unspecified",
+    }
+}
+
+fn render_revocation_target(target: &membership::RevocationTarget) -> String {
+    match target {
+        membership::RevocationTarget::EnrollmentToken { token_id } => {
+            format!("enrollment_token:{}", hex_bytes(token_id))
+        }
+        membership::RevocationTarget::MembershipCertificate {
+            subject_peer_id,
+            issued_at,
+        } => format!("membership_certificate:{subject_peer_id}:{issued_at}"),
+        membership::RevocationTarget::CapabilityGrant {
+            subject_peer_id,
+            sequence,
+        } => format!("capability_grant:{subject_peer_id}:{sequence}"),
+        membership::RevocationTarget::Peer { peer_id } => format!("peer:{peer_id}"),
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
 fn load_or_init_identity(
     identity_path: &str,
     passphrase_env: &str,
@@ -1783,6 +2247,9 @@ fn reconcile_disposition_label(disposition: &fabric::SessionReconcileDisposition
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daemonapi::{AuthoritySyncResult, RuntimeStatusResult};
+    use quic::QuicTransportAdapter;
+    use serde_json::json;
 
     #[test]
     fn prepare_state_for_trigger_reloads_existing_state_for_state_change() {
@@ -1896,6 +2363,180 @@ mod tests {
         assert_eq!(persisted.runtime_instance_id, "runtime-instance-123");
         assert_eq!(persisted.endpoint, "http://127.0.0.1:4000/rpc");
         let _ = std::fs::remove_file(discovery_path);
+    }
+
+    #[test]
+    fn state_sync_requires_reevaluation_when_report_changes_authority_facts() {
+        assert!(state_sync_requires_reevaluation(&fabric::StateSyncReport {
+            membership_changed: false,
+            grants_added: 0,
+            grants_removed: 1,
+            revocations_added: 0,
+            bootstrap_hints_added: 0,
+            bootstrap_hints_removed: 0,
+            relay_announcements_added: 0,
+        }));
+        assert!(!state_sync_requires_reevaluation(&fabric::StateSyncReport {
+            membership_changed: false,
+            grants_added: 0,
+            grants_removed: 0,
+            revocations_added: 0,
+            bootstrap_hints_added: 0,
+            bootstrap_hints_removed: 0,
+            relay_announcements_added: 0,
+        }));
+    }
+
+    #[test]
+    fn runtime_status_reports_authority_subject_mismatch_instead_of_failing() {
+        let state_path = unique_temp_path("quipd-runtime-status-subject-mismatch");
+        let control = LocalControlPlane::new(DaemonConfig::new("status-subject-mismatch", &state_path));
+        let local_identity = IdentityKeypair::from_secret_bytes([101_u8; 32]);
+        let other_identity = IdentityKeypair::from_secret_bytes([102_u8; 32]);
+        let authority = IdentityKeypair::from_secret_bytes([103_u8; 32]);
+        let mut state = fabric::fixture_daemon_state("status-subject-mismatch");
+        state.local_peer_id = local_identity.peer_id();
+        state.membership = membership::MembershipCertificate::issue(
+            &authority,
+            fabric::NetworkId::derive("status-subject-mismatch"),
+            other_identity.peer_id(),
+            100,
+            300,
+            vec!["member".to_string()],
+        );
+        state.save(&state_path).expect("state should persist");
+        let args = test_args(state_path.to_string_lossy().as_ref());
+        let transport = QuicTransportAdapter::with_identity(
+            fabric::NetworkId::derive("status-subject-mismatch"),
+            local_identity.clone(),
+        );
+
+        let response = runtime_status_response(
+            &args,
+            &control,
+            &transport,
+            &local_identity,
+            RequestEnvelope {
+                request_id: "req-status".to_string(),
+                operation: "runtime.status".to_string(),
+                auth: daemonapi::RequestAuth {
+                    kind: daemonapi::AuthKind::LocalProcess,
+                },
+                payload: json!({}),
+            },
+        );
+
+        assert!(response.ok);
+        let result: RuntimeStatusResult =
+            serde_json::from_value(response.result.expect("status result should exist"))
+                .expect("status result should deserialize");
+        assert_eq!(result.authority.sync_status, "subject_mismatch");
+        assert!(result.authority.authority_subject_mismatch);
+        let _ = std::fs::remove_file(state_path);
+    }
+
+    #[tokio::test]
+    async fn authority_sync_response_triggers_live_reevaluation_when_grants_are_removed() {
+        let state_path = unique_temp_path("quipd-authority-sync-reevaluation");
+        let network = "authority-sync-reevaluation";
+        let control = LocalControlPlane::new(DaemonConfig::new(network, &state_path));
+        let authority = IdentityKeypair::from_secret_bytes([104_u8; 32]);
+        let local_identity = IdentityKeypair::from_secret_bytes([105_u8; 32]);
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let mut state = fabric::fixture_daemon_state(network);
+        let target = state
+            .peers
+            .first()
+            .expect("fixture peer should exist")
+            .snapshot
+            .peer
+            .clone();
+        state.local_peer_id = local_identity.peer_id();
+        state.membership = membership::MembershipCertificate::issue(
+            &authority,
+            fabric::NetworkId::derive(network),
+            local_identity.peer_id(),
+            100,
+            300,
+            vec!["member".to_string()],
+        );
+        state.capability_grants = vec![membership::CapabilityGrant::issue(
+            &authority,
+            fabric::NetworkId::derive(network),
+            local_identity.peer_id(),
+            vec!["control.access".to_string()],
+            vec![protocol.clone()],
+            membership::ResourceLimits::default(),
+            vec![],
+            100,
+            300,
+            1,
+        )];
+        state.denied_peers.clear();
+        state.save(&state_path).expect("state should persist");
+        let transport = QuicTransportAdapter::with_identity(
+            fabric::NetworkId::derive(network),
+            local_identity.clone(),
+        );
+        let _session = control
+            .realize_best_path(&target, &protocol, TrafficClass::Control, &transport)
+            .await
+            .expect("session should establish");
+        let args = test_args(state_path.to_string_lossy().as_ref());
+        let state_path_for_closure = state_path.clone();
+
+        let response = authority_sync_response(
+            &args,
+            &control,
+            &transport,
+            &local_identity,
+            "req-sync".to_string(),
+            "snapshot",
+            Some("/tmp/authority-snapshot.json".to_string()),
+            None,
+            None,
+            move |_| {
+                let mut updated = fabric::DaemonState::load(&state_path_for_closure)
+                    .expect("state should load");
+                updated.capability_grants.clear();
+                updated
+                    .save(&state_path_for_closure)
+                    .expect("state should persist");
+                Ok((
+                    updated,
+                    fabric::StateSyncReport {
+                        membership_changed: false,
+                        grants_added: 0,
+                        grants_removed: 1,
+                        revocations_added: 0,
+                        bootstrap_hints_added: 0,
+                        bootstrap_hints_removed: 0,
+                        relay_announcements_added: 0,
+                    },
+                ))
+            },
+        )
+        .await;
+
+        assert!(response.ok);
+        let result: AuthoritySyncResult =
+            serde_json::from_value(response.result.expect("sync result should exist"))
+                .expect("sync result should deserialize");
+        assert_eq!(result.grants_removed, 1);
+        assert_eq!(result.authority.closed_sessions, 1);
+        assert_eq!(result.authority.reconnect_suppressions_added, 1);
+
+        let events = transport.recent_events(16).expect("events should load");
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "authority.sync_started"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "authority.sync_completed"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "authority.policy_enforced"));
+        let _ = std::fs::remove_file(state_path);
     }
 
     fn test_args(state_path: &str) -> Args {

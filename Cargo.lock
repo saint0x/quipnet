@@ -1034,6 +1034,7 @@ dependencies = [
  "daemonapi",
  "fabric",
  "identity",
+ "membership",
  "observability",
  "quic",
  "rand",

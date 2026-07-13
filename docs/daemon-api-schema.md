@@ -190,6 +190,8 @@ Result should include:
 - configured authority subject if pinned
 - accepted authority summary
 - last sync summary
+- live reevaluation summary
+- authority subject mismatch status when present
 
 ### `authority.sync`
 
@@ -200,6 +202,8 @@ Result should include:
 - sync started or completed status
 - resulting authority summary
 - affected membership or capability deltas when available
+- removal deltas for grants or bootstrap hints when a new accepted snapshot withdraws them
+- whether live runtime reevaluation ran as a consequence
 
 ### `authority.membership`
 
@@ -218,6 +222,17 @@ Purpose:
 Result should include:
 - local node capability summary
 - relevant peer or role capability summaries when applicable
+
+### `authority.revocations`
+
+Purpose:
+- inspect accepted revocation facts
+
+Result should include:
+- issuer summary
+- target summary
+- effective time
+- reason
 
 ## Identity Operations
 

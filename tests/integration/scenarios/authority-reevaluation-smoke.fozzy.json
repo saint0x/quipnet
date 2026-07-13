@@ -37,6 +37,24 @@
       "stdout": "",
       "stderr": "",
       "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "quipd", "authority_sync_response_triggers_live_reevaluation_when_grants_are_removed"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
+    },
+    {
+      "type": "proc_when",
+      "cmd": "cargo",
+      "args": ["test", "-p", "control", "merge_snapshot_reports_removed_grants_and_bootstrap_hints"],
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "",
+      "times": 1
     }
   ]
 }

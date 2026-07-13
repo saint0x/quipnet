@@ -244,6 +244,116 @@ pub struct RuntimeHealthResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorityShowResult {
+    pub truth_kind: String,
+    pub configured_origin: Option<String>,
+    pub configured_subject: Option<String>,
+    pub configured_snapshot: Option<String>,
+    pub network: String,
+    pub local_peer_id: String,
+    pub membership_subject_peer_id: String,
+    pub membership_issuer_peer_id: String,
+    pub membership_roles: Vec<String>,
+    pub grants: usize,
+    pub revocations: usize,
+    pub denied_peers: usize,
+    pub bootstrap_hints: usize,
+    pub relays: usize,
+    pub schema_version: u64,
+    pub authority: AuthoritySyncStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorityMembershipResult {
+    pub truth_kind: String,
+    pub network: String,
+    pub subject_peer_id: String,
+    pub issuer_peer_id: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub roles: Vec<String>,
+    pub schema_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorityCapabilitiesResult {
+    pub truth_kind: String,
+    pub network: String,
+    pub subject_peer_id: String,
+    pub schema_version: u64,
+    pub grants: Vec<AuthorityCapabilityGrantEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorityCapabilityGrantEntry {
+    pub subject_peer_id: String,
+    pub issuer_peer_id: String,
+    pub sequence: u64,
+    pub not_before: u64,
+    pub expires_at: u64,
+    pub capabilities: Vec<String>,
+    pub protocols: Vec<String>,
+    pub bandwidth_bps: Option<u64>,
+    pub concurrent_streams: Option<u32>,
+    pub max_object_bytes: Option<u64>,
+    pub constraints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorityRevocationsResult {
+    pub truth_kind: String,
+    pub network: String,
+    pub schema_version: u64,
+    pub revocations: Vec<AuthorityRevocationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorityRevocationEntry {
+    pub sequence: u64,
+    pub issuer_peer_id: String,
+    pub effective_at: u64,
+    pub reason: String,
+    pub target: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthoritySyncSnapshotPayload {
+    pub authority_snapshot: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthoritySyncOriginPayload {
+    pub authority_origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_subject: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthoritySyncRevocationsOriginPayload {
+    pub authority_origin: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthoritySyncResult {
+    pub truth_kind: String,
+    pub authority_source: String,
+    pub authority_origin: Option<String>,
+    pub authority_subject: Option<String>,
+    pub authority_snapshot: Option<String>,
+    pub network: String,
+    pub local_peer_id: String,
+    pub grants_added: usize,
+    pub grants_removed: usize,
+    pub revocations_added: usize,
+    pub bootstrap_hints_added: usize,
+    pub bootstrap_hints_removed: usize,
+    pub relay_announcements_added: usize,
+    pub membership_changed: bool,
+    pub authority: AuthoritySyncStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionConnectPayload {
     pub peer_id: String,
     pub protocol: String,

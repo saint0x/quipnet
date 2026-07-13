@@ -82,6 +82,7 @@ Candidate subcommands:
 - `quip authority subject`
 - `quip authority membership`
 - `quip authority capabilities`
+- `quip authority revocations`
 
 Primary source:
 - daemon API for live view

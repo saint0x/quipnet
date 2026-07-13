@@ -1,12 +1,14 @@
 use clap::{Parser, Subcommand};
 use crypto::IdentityKeypair;
 use daemonapi::{
-    AuthKind, DaemonEndpointDiscovery, RequestAuth, RequestEnvelope, ResponseEnvelope,
-    RuntimeEventsListResult, RuntimeHealthResult, RuntimeListenerEntry, RuntimeListenersListResult,
-    RuntimePathAlternativeEntry, RuntimePathEntry, RuntimePathsListResult,
-    RuntimeSessionsListResult, RuntimeStatusResult, SessionClosePayload, SessionCloseResult,
-    SessionConnectPayload, SessionConnectResult, SessionReconcilePayload, SessionReconcileResult,
-    SessionUpgradePayload, SessionUpgradeResult,
+    AuthKind, AuthorityCapabilitiesResult, AuthorityMembershipResult, AuthorityRevocationsResult,
+    AuthorityShowResult, AuthoritySyncOriginPayload, AuthoritySyncResult,
+    AuthoritySyncRevocationsOriginPayload, AuthoritySyncSnapshotPayload, DaemonEndpointDiscovery,
+    RequestAuth, RequestEnvelope, ResponseEnvelope, RuntimeEventsListResult, RuntimeHealthResult,
+    RuntimeListenerEntry, RuntimeListenersListResult, RuntimePathAlternativeEntry,
+    RuntimePathEntry, RuntimePathsListResult, RuntimeSessionsListResult, RuntimeStatusResult,
+    SessionClosePayload, SessionCloseResult, SessionConnectPayload, SessionConnectResult,
+    SessionReconcilePayload, SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
 use fabric::{DaemonConfig, LocalControlPlane, PeerId, ProtocolId, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
@@ -716,128 +718,211 @@ async fn run() -> Result<(), Box<dyn Error>> {
         },
         Command::Authority { command } => match command {
             AuthorityCommand::Show => {
-                let state = control.ensure_state()?;
+                let authority =
+                    daemon_request::<AuthorityShowResult>(&cli, "authority.show", json!({}))?;
                 println!(
-                    "network={} local_peer={} membership_subject={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} durable_only=true",
-                    state.network,
-                    state.local_peer_id,
-                    state.membership.subject_peer_id,
-                    state.capability_grants.len(),
-                    state.revocations.len(),
-                    state.denied_peers.len(),
-                    state.bootstrap.len(),
-                    state.relay_count(),
-                    state.schema_version
+                    "network={} local_peer={} membership_subject={} membership_issuer={} roles={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} configured_origin={} configured_subject={} configured_snapshot={} truth_kind={}",
+                    authority.network,
+                    authority.local_peer_id,
+                    authority.membership_subject_peer_id,
+                    authority.membership_issuer_peer_id,
+                    render_csv(&authority.membership_roles),
+                    authority.grants,
+                    authority.revocations,
+                    authority.denied_peers,
+                    authority.bootstrap_hints,
+                    authority.relays,
+                    authority.schema_version,
+                    authority.authority.sync_status,
+                    authority.authority.health,
+                    authority.authority.authority_subject_mismatch,
+                    authority.authority.local_policy_denied,
+                    authority
+                        .authority
+                        .local_policy_reason
+                        .as_deref()
+                        .unwrap_or("none"),
+                    authority.authority.reevaluated_sessions,
+                    authority.authority.closed_sessions,
+                    authority.authority.unchanged_sessions,
+                    authority.authority.reconnect_suppressions_added,
+                    authority.authority.reconnect_suppressions_cleared,
+                    authority.authority.last_accepted_revision,
+                    authority.configured_origin.as_deref().unwrap_or("none"),
+                    authority.configured_subject.as_deref().unwrap_or("none"),
+                    authority.configured_snapshot.as_deref().unwrap_or("none"),
+                    authority.truth_kind
                 );
             }
             AuthorityCommand::Membership => {
-                let state = control.ensure_state()?;
+                let membership = daemon_request::<AuthorityMembershipResult>(
+                    &cli,
+                    "authority.membership",
+                    json!({}),
+                )?;
                 println!(
-                    "network={} subject_peer={} issuer_peer={} issued_at={} expires_at={} roles={} schema_version={} durable_only=true",
-                    state.network,
-                    state.membership.subject_peer_id,
-                    state.membership.issuer_peer_id,
-                    state.membership.issued_at,
-                    state.membership.expires_at,
-                    render_roles(&state.membership.roles),
-                    state.schema_version
+                    "network={} subject_peer={} issuer_peer={} issued_at={} expires_at={} roles={} schema_version={} truth_kind={}",
+                    membership.network,
+                    membership.subject_peer_id,
+                    membership.issuer_peer_id,
+                    membership.issued_at,
+                    membership.expires_at,
+                    render_roles(&membership.roles),
+                    membership.schema_version,
+                    membership.truth_kind
                 );
             }
             AuthorityCommand::Capabilities => {
-                let state = control.ensure_state()?;
-                let grants = state.grants_for_peer(&state.local_peer_id);
-                if grants.is_empty() {
+                let capabilities = daemon_request::<AuthorityCapabilitiesResult>(
+                    &cli,
+                    "authority.capabilities",
+                    json!({}),
+                )?;
+                if capabilities.grants.is_empty() {
                     println!(
-                        "network={} subject_peer={} active_grants=0 schema_version={} durable_only=true",
-                        state.network, state.local_peer_id, state.schema_version
+                        "network={} subject_peer={} active_grants=0 schema_version={} truth_kind={}",
+                        capabilities.network,
+                        capabilities.subject_peer_id,
+                        capabilities.schema_version,
+                        capabilities.truth_kind
                     );
                 } else {
-                    for grant in grants {
+                    for grant in capabilities.grants {
                         println!(
-                            "network={} subject_peer={} issuer_peer={} sequence={} not_before={} expires_at={} capabilities={} protocols={} limits={} constraints={} schema_version={} durable_only=true",
-                            state.network,
+                            "network={} subject_peer={} issuer_peer={} sequence={} not_before={} expires_at={} capabilities={} protocols={} limits={} constraints={} schema_version={} truth_kind={}",
+                            capabilities.network,
                             grant.subject_peer_id,
                             grant.issuer_peer_id,
                             grant.sequence,
                             grant.not_before,
                             grant.expires_at,
                             render_csv(&grant.capabilities),
-                            render_protocols(&grant.protocol_scopes),
-                            render_limits(&grant.resource_limits),
+                            render_csv(&grant.protocols),
+                            render_structured_limits(
+                                grant.bandwidth_bps,
+                                grant.concurrent_streams,
+                                grant.max_object_bytes,
+                            ),
                             render_csv(&grant.constraints),
-                            state.schema_version
+                            capabilities.schema_version,
+                            capabilities.truth_kind
                         );
                     }
                 }
             }
             AuthorityCommand::Revocations => {
-                let state = control.ensure_state()?;
-                if state.revocations.is_empty() {
+                let revocations = daemon_request::<AuthorityRevocationsResult>(
+                    &cli,
+                    "authority.revocations",
+                    json!({}),
+                )?;
+                if revocations.revocations.is_empty() {
                     println!(
-                        "network={} revocations=0 schema_version={} durable_only=true",
-                        state.network, state.schema_version
+                        "network={} revocations=0 schema_version={} truth_kind={}",
+                        revocations.network, revocations.schema_version, revocations.truth_kind
                     );
                 } else {
-                    for revocation in &state.revocations {
+                    for revocation in &revocations.revocations {
                         println!(
-                            "network={} sequence={} issuer_peer={} effective_at={} reason={} target={} note={} schema_version={} durable_only=true",
-                            state.network,
+                            "network={} sequence={} issuer_peer={} effective_at={} reason={} target={} note={} schema_version={} truth_kind={}",
+                            revocations.network,
                             revocation.sequence,
                             revocation.issuer_peer_id,
                             revocation.effective_at,
-                            render_revocation_reason(&revocation.reason),
-                            render_revocation_target(&revocation.target),
+                            revocation.reason,
+                            revocation.target,
                             revocation.note.as_deref().unwrap_or("none"),
-                            state.schema_version
+                            revocations.schema_version,
+                            revocations.truth_kind
                         );
                     }
                 }
             }
             AuthorityCommand::SyncSnapshot { authority_snapshot } => {
-                let (state, report) = control.sync_authority_snapshot(&authority_snapshot)?;
+                let result = daemon_request::<AuthoritySyncResult>(
+                    &cli,
+                    "authority.sync_snapshot",
+                    serde_json::to_value(AuthoritySyncSnapshotPayload { authority_snapshot })?,
+                )?;
                 println!(
-                    "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={} authority_source=snapshot",
-                    state.network,
-                    state.local_peer_id,
-                    report.grants_added,
-                    report.revocations_added,
-                    report.bootstrap_hints_added,
-                    report.relay_announcements_added,
-                    report.membership_changed,
-                    cli.state_path
+                    "synced network={} local_peer={} grants_added={} grants_removed={} revocations_added={} bootstrap_hints_added={} bootstrap_hints_removed={} relay_announcements_added={} membership_changed={} authority_source={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
+                    result.network,
+                    result.local_peer_id,
+                    result.grants_added,
+                    result.grants_removed,
+                    result.revocations_added,
+                    result.bootstrap_hints_added,
+                    result.bootstrap_hints_removed,
+                    result.relay_announcements_added,
+                    result.membership_changed,
+                    result.authority_source,
+                    result.authority.last_accepted_revision,
+                    result.authority.sync_status,
+                    result.authority.health,
+                    result.authority.reevaluated_sessions,
+                    result.authority.closed_sessions,
+                    result.authority.reconnect_suppressions_added,
+                    result.truth_kind
                 );
             }
             AuthorityCommand::SyncOrigin {
                 authority_origin,
                 authority_subject,
             } => {
-                let (state, report) = control
-                    .sync_authority_origin(&authority_origin, authority_subject.as_deref())?;
+                let result = daemon_request::<AuthoritySyncResult>(
+                    &cli,
+                    "authority.sync_origin",
+                    serde_json::to_value(AuthoritySyncOriginPayload {
+                        authority_origin,
+                        authority_subject,
+                    })?,
+                )?;
                 println!(
-                    "synced network={} local_peer={} grants_added={} revocations_added={} bootstrap_hints_added={} relay_announcements_added={} membership_changed={} state_path={} authority_origin={} authority_subject={}",
-                    state.network,
-                    state.local_peer_id,
-                    report.grants_added,
-                    report.revocations_added,
-                    report.bootstrap_hints_added,
-                    report.relay_announcements_added,
-                    report.membership_changed,
-                    cli.state_path,
-                    authority_origin,
-                    authority_subject.as_deref().unwrap_or("active")
+                    "synced network={} local_peer={} grants_added={} grants_removed={} revocations_added={} bootstrap_hints_added={} bootstrap_hints_removed={} relay_announcements_added={} membership_changed={} authority_source={} authority_origin={} authority_subject={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
+                    result.network,
+                    result.local_peer_id,
+                    result.grants_added,
+                    result.grants_removed,
+                    result.revocations_added,
+                    result.bootstrap_hints_added,
+                    result.bootstrap_hints_removed,
+                    result.relay_announcements_added,
+                    result.membership_changed,
+                    result.authority_source,
+                    result.authority_origin.as_deref().unwrap_or("none"),
+                    result.authority_subject.as_deref().unwrap_or("active"),
+                    result.authority.last_accepted_revision,
+                    result.authority.sync_status,
+                    result.authority.health,
+                    result.authority.reevaluated_sessions,
+                    result.authority.closed_sessions,
+                    result.authority.reconnect_suppressions_added,
+                    result.truth_kind
                 );
             }
             AuthorityCommand::SyncRevocationsOrigin { authority_origin } => {
-                let (state, revocations_added) =
-                    control.sync_authority_revocations_origin(&authority_origin)?;
+                let result = daemon_request::<AuthoritySyncResult>(
+                    &cli,
+                    "authority.sync_revocations_origin",
+                    serde_json::to_value(AuthoritySyncRevocationsOriginPayload {
+                        authority_origin,
+                    })?,
+                )?;
                 println!(
-                    "synced-revocations network={} local_peer={} revocations_added={} denied={} state_path={} authority_origin={}",
-                    state.network,
-                    state.local_peer_id,
-                    revocations_added,
-                    state.denied_peers.len(),
-                    cli.state_path,
-                    authority_origin
+                    "synced-revocations network={} local_peer={} revocations_added={} membership_changed={} authority_source={} authority_origin={} authority_revision={} authority_sync={} authority_health={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_reconnect_suppressions_added={} truth_kind={}",
+                    result.network,
+                    result.local_peer_id,
+                    result.revocations_added,
+                    result.membership_changed,
+                    result.authority_source,
+                    result.authority_origin.as_deref().unwrap_or("none"),
+                    result.authority.last_accepted_revision,
+                    result.authority.sync_status,
+                    result.authority.health,
+                    result.authority.reevaluated_sessions,
+                    result.authority.closed_sessions,
+                    result.authority.reconnect_suppressions_added,
+                    result.truth_kind
                 );
             }
         },
@@ -1135,30 +1220,30 @@ fn render_protocols(protocols: &[ProtocolId]) -> String {
 }
 
 fn render_limits(limits: &membership::ResourceLimits) -> String {
-    format!(
-        "bandwidth_bps:{}|concurrent_streams:{}|max_object_bytes:{}",
-        limits
-            .bandwidth_bps
-            .map(|value: u64| value.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-        limits
-            .concurrent_streams
-            .map(|value: u32| value.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-        limits
-            .max_object_bytes
-            .map(|value: u64| value.to_string())
-            .unwrap_or_else(|| "none".to_string())
+    render_structured_limits(
+        limits.bandwidth_bps,
+        limits.concurrent_streams,
+        limits.max_object_bytes,
     )
 }
 
-fn render_revocation_reason(reason: &membership::RevocationReason) -> &'static str {
-    match reason {
-        membership::RevocationReason::Administrative => "administrative",
-        membership::RevocationReason::KeyCompromise => "key_compromise",
-        membership::RevocationReason::Superseded => "superseded",
-        membership::RevocationReason::Unspecified => "unspecified",
-    }
+fn render_structured_limits(
+    bandwidth_bps: Option<u64>,
+    concurrent_streams: Option<u32>,
+    max_object_bytes: Option<u64>,
+) -> String {
+    format!(
+        "bandwidth_bps:{}|concurrent_streams:{}|max_object_bytes:{}",
+        bandwidth_bps
+            .map(|value: u64| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        concurrent_streams
+            .map(|value: u32| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        max_object_bytes
+            .map(|value: u64| value.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
 }
 
 fn render_revocation_target(target: &membership::RevocationTarget) -> String {
@@ -1569,23 +1654,40 @@ mod tests {
     }
 
     #[test]
-    fn authority_show_output_is_durable_not_runtime() {
+    fn authority_show_output_includes_live_authority_summary() {
         let state = fabric::fixture_daemon_state("authority-show-cli");
         let output = format!(
-            "network={} local_peer={} membership_subject={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} durable_only=true",
+            "network={} local_peer={} membership_subject={} membership_issuer={} roles={} grants={} revocations={} denied={} bootstrap={} relays={} schema_version={} authority_sync={} authority_health={} authority_subject_mismatch={} authority_local_policy_denied={} authority_reason={} authority_reevaluated_sessions={} authority_closed_sessions={} authority_unchanged_sessions={} authority_reconnect_suppressions_added={} authority_reconnect_suppressions_cleared={} authority_revision={} configured_origin={} configured_subject={} configured_snapshot={} truth_kind={}",
             state.network,
             state.local_peer_id,
             state.membership.subject_peer_id,
+            state.membership.issuer_peer_id,
+            render_csv(&state.membership.roles),
             state.capability_grants.len(),
             state.revocations.len(),
             state.denied_peers.len(),
             state.bootstrap.len(),
             state.relay_count(),
-            state.schema_version
+            state.schema_version,
+            "in_sync",
+            "ready",
+            false,
+            false,
+            "none",
+            0,
+            0,
+            0,
+            0,
+            0,
+            "membership:test:grants:0:revocations:0:max_seq:0",
+            "none",
+            "none",
+            "none",
+            "runtime"
         );
 
-        assert!(output.contains("durable_only=true"));
-        assert!(output.contains("schema_version="));
+        assert!(output.contains("authority_sync=in_sync"));
+        assert!(output.contains("truth_kind=runtime"));
     }
 
     #[test]
@@ -1604,6 +1706,14 @@ mod tests {
 
         assert_eq!(
             render_limits(&limits),
+            "bandwidth_bps:1000|concurrent_streams:none|max_object_bytes:4096"
+        );
+    }
+
+    #[test]
+    fn render_structured_limits_outputs_stable_operator_surface() {
+        assert_eq!(
+            render_structured_limits(Some(1_000), None, Some(4_096)),
             "bandwidth_bps:1000|concurrent_streams:none|max_object_bytes:4096"
         );
     }

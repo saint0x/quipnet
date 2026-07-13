@@ -48,8 +48,10 @@ pub enum ControlError {
 pub struct SnapshotDelta {
     pub membership_changed: bool,
     pub grants_added: usize,
+    pub grants_removed: usize,
     pub revocations_added: usize,
     pub bootstrap_hints_added: usize,
+    pub bootstrap_hints_removed: usize,
 }
 
 impl SnapshotDelta {
@@ -57,8 +59,10 @@ impl SnapshotDelta {
         Self {
             membership_changed: false,
             grants_added: 0,
+            grants_removed: 0,
             revocations_added: 0,
             bootstrap_hints_added: 0,
+            bootstrap_hints_removed: 0,
         }
     }
 }
@@ -181,8 +185,10 @@ impl ControlClient {
             let delta = SnapshotDelta {
                 membership_changed: incoming.membership.is_some(),
                 grants_added: incoming.capability_grants.len(),
+                grants_removed: 0,
                 revocations_added: incoming.revocations.len(),
                 bootstrap_hints_added: incoming.bootstrap_hints.len(),
+                bootstrap_hints_removed: 0,
             };
             return Ok((incoming, delta));
         };
@@ -191,17 +197,35 @@ impl ControlClient {
         let membership = merge_membership(current.membership.clone(), incoming.membership)?;
         let membership_changed = membership != current.membership;
 
-        let mut grants = current.capability_grants;
-        for grant in incoming.capability_grants {
-            if let Some(existing) = grants.iter().find(|existing| same_grant(existing, &grant)) {
-                if existing != &grant {
+        let current_grants = current.capability_grants;
+        let incoming_grants = incoming.capability_grants;
+        for grant in &incoming_grants {
+            if let Some(existing) = current_grants
+                .iter()
+                .find(|existing| same_grant(existing, grant))
+            {
+                if existing != grant {
                     return Err(ControlError::GrantConflict);
                 }
-            } else {
-                grants.push(grant);
-                delta.grants_added += 1;
             }
         }
+        delta.grants_added = incoming_grants
+            .iter()
+            .filter(|grant| {
+                !current_grants
+                    .iter()
+                    .any(|existing| same_grant(existing, grant))
+            })
+            .count();
+        delta.grants_removed = current_grants
+            .iter()
+            .filter(|grant| {
+                !incoming_grants
+                    .iter()
+                    .any(|incoming| same_grant(grant, incoming))
+            })
+            .count();
+        let grants = incoming_grants;
 
         let mut revocations = current.revocations;
         for revocation in incoming.revocations {
@@ -214,20 +238,25 @@ impl ControlClient {
             }
         }
 
-        let mut bootstrap_hints = current.bootstrap_hints;
-        for hint in incoming.bootstrap_hints {
-            if let Some(index) = bootstrap_hints
-                .iter()
-                .position(|existing| same_hint(existing, &hint))
-            {
-                if bootstrap_hints[index] != hint {
-                    bootstrap_hints[index] = hint;
-                }
-            } else {
-                bootstrap_hints.push(hint);
-                delta.bootstrap_hints_added += 1;
-            }
-        }
+        let current_bootstrap_hints = current.bootstrap_hints;
+        let incoming_bootstrap_hints = incoming.bootstrap_hints;
+        delta.bootstrap_hints_added = incoming_bootstrap_hints
+            .iter()
+            .filter(|hint| {
+                !current_bootstrap_hints
+                    .iter()
+                    .any(|existing| same_hint(existing, hint))
+            })
+            .count();
+        delta.bootstrap_hints_removed = current_bootstrap_hints
+            .iter()
+            .filter(|hint| {
+                !incoming_bootstrap_hints
+                    .iter()
+                    .any(|incoming| same_hint(hint, incoming))
+            })
+            .count();
+        let bootstrap_hints = incoming_bootstrap_hints;
 
         delta.membership_changed = membership_changed;
         Ok((
@@ -626,5 +655,94 @@ mod tests {
         assert_eq!(hints[0].addresses[0], "quic://198.51.100.20:8443");
         assert_eq!(revocations, snapshot.revocations);
         assert_eq!(fetched_relay_map, relay_map);
+    }
+
+    #[test]
+    fn merge_snapshot_reports_removed_grants_and_bootstrap_hints() {
+        let issuer = IdentityKeypair::from_secret_bytes([41_u8; 32]);
+        let subject = IdentityKeypair::from_secret_bytes([42_u8; 32]);
+        let network_id = NetworkId::derive("control:removals");
+        let membership = MembershipCertificate::issue(
+            &issuer,
+            network_id.clone(),
+            subject.peer_id(),
+            100,
+            300,
+            vec!["member".to_string()],
+        );
+        let protocol = model::ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let current = AuthorityArtifactSnapshot {
+            network_id: network_id.clone(),
+            enrollment_token: None,
+            membership: Some(membership.clone()),
+            capability_grants: vec![
+                CapabilityGrant::issue(
+                    &issuer,
+                    network_id.clone(),
+                    subject.peer_id(),
+                    vec!["control.access".to_string()],
+                    vec![protocol.clone()],
+                    membership::ResourceLimits::default(),
+                    vec![],
+                    100,
+                    300,
+                    1,
+                ),
+                CapabilityGrant::issue(
+                    &issuer,
+                    network_id.clone(),
+                    subject.peer_id(),
+                    vec!["records.publish".to_string()],
+                    vec![model::ProtocolId::new("/quicnet/records/1").expect("protocol")],
+                    membership::ResourceLimits::default(),
+                    vec![],
+                    100,
+                    300,
+                    2,
+                ),
+            ],
+            revocations: vec![],
+            bootstrap_hints: vec![
+                BootstrapHint {
+                    peer_id: Some(subject.peer_id()),
+                    addresses: vec!["quic://198.51.100.10:8443".to_string()],
+                    metadata: BTreeMap::new(),
+                },
+                BootstrapHint {
+                    peer_id: None,
+                    addresses: vec!["https://bootstrap.example.invalid".to_string()],
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let incoming = AuthorityArtifactSnapshot {
+            network_id: network_id.clone(),
+            enrollment_token: None,
+            membership: Some(membership),
+            capability_grants: vec![current.capability_grants[0].clone()],
+            revocations: vec![],
+            bootstrap_hints: vec![current.bootstrap_hints[0].clone()],
+        };
+        let client = ControlClient {
+            network_id,
+            endpoints: AuthorityEndpoints {
+                enrollment: "https://authority.example.invalid/enroll".to_string(),
+                revocation: "https://authority.example.invalid/revoke".to_string(),
+                relay_map: "https://authority.example.invalid/relays".to_string(),
+                bootstrap: "https://authority.example.invalid/bootstrap".to_string(),
+                snapshot: "https://authority.example.invalid/snapshot".to_string(),
+            },
+        };
+
+        let (merged, delta) = client
+            .merge_snapshot(Some(current), incoming)
+            .expect("merge should succeed");
+
+        assert_eq!(merged.capability_grants.len(), 1);
+        assert_eq!(merged.bootstrap_hints.len(), 1);
+        assert_eq!(delta.grants_added, 0);
+        assert_eq!(delta.grants_removed, 1);
+        assert_eq!(delta.bootstrap_hints_added, 0);
+        assert_eq!(delta.bootstrap_hints_removed, 1);
     }
 }

@@ -10,6 +10,7 @@ clap.workspace = true
 crypto = { path = "../../crates/crypto" }
 daemonapi = { path = "../../crates/daemonapi" }
 identity = { path = "../../crates/identity" }
+membership = { path = "../../crates/membership" }
 observability = { path = "../../crates/observability" }
 fabric = { path = "../../crates/fabric" }
 quic = { path = "../../crates/quic" }
