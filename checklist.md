@@ -5,8 +5,7 @@
 - [ ] Implement the concrete daemon control surface from `docs/daemon-api-schema.md` and `docs/daemon-api-examples.md`: stable request/response envelopes, stable error codes, runtime inspection operations, session lifecycle operations, authority operations, identity operations, and durable-state operations.
 - [ ] Align the real `quip` command tree to `docs/cli-surface.md`: `status`, `runtime`, `session`, `authority`, `identity`, and `state`, with runtime commands daemon-backed and durable commands clearly separated.
 - [ ] Eliminate the remaining non-session cases where cached local state is still presented as live runtime truth, especially around path, reconnect, and authority-driven runtime status.
-- [ ] Enforce the durable-state contract for `~/.quip/net/state.json`: schema versioning, strict allowlist validation, migration rules, rejection of runtime-only fields, and safe startup failure on invalid state.
-- [ ] Wire `schemas/state/` and `fixtures/state/` into durable-state loading, migration tests, and validation tests, including rejection of runtime-only fields.
+- [ ] Finish the durable-state contract for `~/.quip/net/state.json` by adding explicit migration handling and bringing the in-code validator fully into line with `schemas/state/` and `fixtures/state/`.
 - [ ] Wire `schemas/daemon/` and `fixtures/daemon/` into daemon API integration tests and CLI rendering tests.
 - [ ] Wire `schemas/events/runtime-event.schema.json` and `fixtures/events/` into runtime event emission tests and scenario assertions.
 - [ ] Implement a bounded runtime event surface matching `docs/runtime-events.md` so lifecycle, authority, path, and reconnect transitions are observable and testable.

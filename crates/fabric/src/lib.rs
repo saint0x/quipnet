@@ -7,6 +7,7 @@ use crypto::IdentityKeypair;
 use membership::{CapabilityGrant, MembershipCertificate, RevocationRecord, RevocationTarget};
 use relaywire::{RelayAnnouncement, RelayMap};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 pub use discovery::{BootstrapHint, BootstrapIngestReport, DiscoveryService};
@@ -24,6 +25,8 @@ pub use routing::{
 };
 pub use scheduler::*;
 pub use transport::*;
+
+pub const DAEMON_STATE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DaemonRole {
@@ -74,6 +77,12 @@ pub enum DaemonStateError {
     SessionNotFound(String),
     #[error("session state is invalid: {0}")]
     InvalidSession(String),
+    #[error("durable state schema version is missing")]
+    MissingSchemaVersion,
+    #[error("durable state schema version {found} is unsupported; expected {expected}")]
+    UnsupportedSchemaVersion { found: u64, expected: u64 },
+    #[error("durable state contains unsupported field `{0}`")]
+    UnsupportedDurableField(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +101,7 @@ pub struct DeniedPeer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DaemonState {
+    pub schema_version: u64,
     pub network: String,
     pub local_peer_id: PeerId,
     pub roles: Vec<DaemonRole>,
@@ -156,14 +166,21 @@ pub struct SessionReconcileReport {
 
 impl DaemonState {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, DaemonStateError> {
-        Ok(serde_json::from_slice(&fs::read(path)?)?)
+        let value = serde_json::from_slice::<Value>(&fs::read(path)?)?;
+        validate_durable_state_value(&value)?;
+        let mut state = serde_json::from_value::<Self>(value)?;
+        state.active_sessions = Vec::new();
+        Ok(state)
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), DaemonStateError> {
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, serde_json::to_vec_pretty(self)?)?;
+        let mut state = self.clone();
+        state.schema_version = DAEMON_STATE_SCHEMA_VERSION;
+        state.active_sessions.clear();
+        fs::write(path, serde_json::to_vec_pretty(&state)?)?;
         Ok(())
     }
 
@@ -490,6 +507,7 @@ impl DaemonState {
         let denied_peers = denied_peers(&membership, &revocations);
 
         let mut state = Self {
+            schema_version: DAEMON_STATE_SCHEMA_VERSION,
             network: network.to_string(),
             local_peer_id: membership.subject_peer_id.clone(),
             roles,
@@ -663,6 +681,7 @@ pub fn fixture_daemon_state(network: &str) -> DaemonState {
     let path_candidates = node.candidate_paths.clone();
 
     DaemonState {
+        schema_version: DAEMON_STATE_SCHEMA_VERSION,
         network: network.to_string(),
         local_peer_id,
         roles: vec![DaemonRole::Edge, DaemonRole::Observer],
@@ -695,6 +714,52 @@ pub fn fixture_daemon_state(network: &str) -> DaemonState {
         active_sessions: Vec::new(),
         path_candidates,
     }
+}
+
+fn validate_durable_state_value(value: &Value) -> Result<(), DaemonStateError> {
+    let object = value.as_object().ok_or_else(|| {
+        DaemonStateError::InvalidSession("durable state must be a JSON object".to_string())
+    })?;
+
+    let schema_version = object
+        .get("schema_version")
+        .ok_or(DaemonStateError::MissingSchemaVersion)?
+        .as_u64()
+        .ok_or_else(|| {
+            DaemonStateError::InvalidSession(
+                "durable state schema version must be an unsigned integer".to_string(),
+            )
+        })?;
+    if schema_version != DAEMON_STATE_SCHEMA_VERSION {
+        return Err(DaemonStateError::UnsupportedSchemaVersion {
+            found: schema_version,
+            expected: DAEMON_STATE_SCHEMA_VERSION,
+        });
+    }
+
+    let allowed_fields = [
+        "schema_version",
+        "network",
+        "local_peer_id",
+        "roles",
+        "membership",
+        "capability_grants",
+        "revocations",
+        "denied_peers",
+        "bootstrap",
+        "relay_map",
+        "peers",
+        "netcheck",
+        "queue_policies",
+        "path_candidates",
+    ];
+    for field in object.keys() {
+        if !allowed_fields.contains(&field.as_str()) {
+            return Err(DaemonStateError::UnsupportedDurableField(field.clone()));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1995,9 +2060,11 @@ mod tests {
         let control = LocalControlPlane::new(DaemonConfig::new("dev", &temp));
         let state = control.ensure_state().expect("state should be created");
         assert_eq!(state.network, "dev");
+        assert_eq!(state.schema_version, DAEMON_STATE_SCHEMA_VERSION);
 
         let loaded = DaemonState::load(&temp).expect("state should be readable");
         assert_eq!(loaded.network, "dev");
+        assert_eq!(loaded.schema_version, DAEMON_STATE_SCHEMA_VERSION);
         let _ = std::fs::remove_file(temp);
     }
 
@@ -2031,6 +2098,83 @@ mod tests {
         assert!(error
             .to_string()
             .contains("does not match runtime identity"));
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn durable_state_requires_schema_version() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-missing-schema-version.json");
+        std::fs::write(
+            &temp,
+            r#"{
+  "network": "dev",
+  "local_peer_id": "ed25519:missing-schema",
+  "roles": [],
+  "membership": {},
+  "capability_grants": [],
+  "revocations": [],
+  "denied_peers": [],
+  "bootstrap": [],
+  "relay_map": null,
+  "peers": [],
+  "netcheck": {
+    "nat_type": "Unknown",
+    "udp_reachable": false,
+    "ipv6_reachable": false,
+    "hairpin_supported": false,
+    "public_udp_addr": null,
+    "port_mapped": false,
+    "probe_observations": []
+  },
+  "queue_policies": [],
+  "path_candidates": []
+}"#,
+        )
+        .expect("fixture should persist");
+
+        let error = DaemonState::load(&temp).expect_err("missing schema version should fail");
+        assert!(matches!(error, DaemonStateError::MissingSchemaVersion));
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn durable_state_rejects_unsupported_schema_version() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-unsupported-schema-version.json");
+        let mut value = serde_json::to_value(fixture_daemon_state("unsupported-schema-version"))
+            .expect("fixture state should serialize");
+        value["schema_version"] = serde_json::json!(99);
+        std::fs::write(&temp, serde_json::to_vec_pretty(&value).expect("serialize"))
+            .expect("fixture should persist");
+
+        let error = DaemonState::load(&temp).expect_err("unsupported schema version should fail");
+        assert!(matches!(
+            error,
+            DaemonStateError::UnsupportedSchemaVersion {
+                found: 99,
+                expected: DAEMON_STATE_SCHEMA_VERSION
+            }
+        ));
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn durable_state_rejects_persisted_runtime_sessions() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-persisted-runtime-sessions.json");
+        let mut value = serde_json::to_value(fixture_daemon_state("persisted-runtime-sessions"))
+            .expect("fixture state should serialize");
+        value["active_sessions"] = serde_json::json!([
+            {
+                "session_id": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+            }
+        ]);
+        std::fs::write(&temp, serde_json::to_vec_pretty(&value).expect("serialize"))
+            .expect("fixture should persist");
+
+        let error = DaemonState::load(&temp).expect_err("persisted runtime sessions should fail");
+        assert!(matches!(
+            error,
+            DaemonStateError::UnsupportedDurableField(field) if field == "active_sessions"
+        ));
         let _ = std::fs::remove_file(temp);
     }
 
@@ -2262,6 +2406,7 @@ mod tests {
             7,
         );
         let state = DaemonState {
+            schema_version: DAEMON_STATE_SCHEMA_VERSION,
             network: network.to_string(),
             local_peer_id: subject.peer_id(),
             roles: vec![DaemonRole::Edge],
