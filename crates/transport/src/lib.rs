@@ -131,6 +131,15 @@ pub struct RuntimeEventSubject {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconnectSuppression {
+    pub peer: PeerId,
+    pub protocol: Option<ProtocolId>,
+    pub class: TrafficClass,
+    pub reason: String,
+    pub imposed_at_unix_secs: u64,
+}
+
 pub trait ConnectionHandle {
     fn snapshot(&self) -> SessionSnapshot;
 }
@@ -162,6 +171,23 @@ pub trait SessionLifecycleTransport: SecureTransport {
     ) -> Result<Option<SessionSnapshot>, TransportError>;
 
     fn recent_events(&self, limit: usize) -> Result<Vec<RuntimeEvent>, TransportError>;
+
+    fn suppress_reconnect(
+        &self,
+        peer: &PeerId,
+        protocol: Option<&ProtocolId>,
+        class: TrafficClass,
+        reason: String,
+    ) -> Result<(), TransportError>;
+
+    fn clear_reconnect_suppression(
+        &self,
+        peer: &PeerId,
+        protocol: Option<&ProtocolId>,
+        class: TrafficClass,
+    ) -> Result<(), TransportError>;
+
+    fn reconnect_suppressions(&self) -> Result<Vec<ReconnectSuppression>, TransportError>;
 
     async fn migrate(
         &self,

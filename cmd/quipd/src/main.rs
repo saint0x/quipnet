@@ -13,6 +13,7 @@ use daemonapi::{
     SessionConnectSummary, SessionReconcileEntry as ApiSessionReconcileEntry,
     SessionReconcilePayload, SessionReconcileResult, SessionUpgradePayload, SessionUpgradeResult,
 };
+use fabric::SessionLifecycleTransport;
 use fabric::{DaemonConfig, LocalControlPlane, ProtocolId, SessionSnapshot, TrafficClass};
 use identity::{FileKeystore, IdentityKeystore};
 use quic::QuicTransportAdapter;
@@ -93,6 +94,7 @@ struct DaemonCycleReport {
     preparation: CyclePreparation,
     reprobe_report: Option<fabric::NetcheckReprobeReport>,
     state: fabric::DaemonState,
+    authority_reevaluation_report: Option<fabric::AuthorityReevaluationReport>,
     reconcile_report: Option<fabric::SessionReconcileReport>,
     active_session: Option<SessionSnapshot>,
     connect_status: String,
@@ -282,6 +284,18 @@ async fn run_cycle(
 ) -> Result<DaemonCycleReport, fabric::DaemonStateError> {
     let (preparation, reprobe_report, _prepared_state) =
         prepare_state_for_trigger(args, control, local_identity, &trigger)?;
+    control.sync_runtime_sessions(transport)?;
+    let authority_reevaluation_report = if matches!(
+        trigger,
+        CycleTrigger::Startup
+            | CycleTrigger::IntervalElapsed
+            | CycleTrigger::AuthoritySnapshotChanged
+            | CycleTrigger::StateChanged
+    ) {
+        Some(control.reevaluate_runtime_authority(transport).await?)
+    } else {
+        None
+    };
     let mut state = control.sync_runtime_sessions(transport)?;
     let reconcile_report = if args.disable_reconcile {
         None
@@ -322,6 +336,7 @@ async fn run_cycle(
         preparation,
         reprobe_report,
         state,
+        authority_reevaluation_report,
         reconcile_report,
         active_session,
         connect_status,
@@ -419,7 +434,7 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
         .map(|decision| decision.explanation.summary)
         .unwrap_or_else(|| "no routing candidates".to_string());
     println!(
-        "quipd active: {} selected_path={} active_session={} preparation={} reprobe={} reconcile={} connect={} trigger={} state_path={}",
+        "quipd active: {} selected_path={} active_session={} preparation={} reprobe={} authority_reevaluation={} reconcile={} connect={} trigger={} state_path={}",
         report.state.status_line(),
         selected_path,
         report
@@ -432,6 +447,11 @@ fn emit_cycle_report(args: &Args, report: &DaemonCycleReport) {
             .reprobe_report
             .as_ref()
             .map(reprobe_summary_line)
+            .unwrap_or_else(|| "none".to_string()),
+        report
+            .authority_reevaluation_report
+            .as_ref()
+            .map(authority_reevaluation_summary_line)
             .unwrap_or_else(|| "none".to_string()),
         report
             .reconcile_report
@@ -694,6 +714,11 @@ fn runtime_status_response(
     local_identity: &IdentityKeypair,
     envelope: RequestEnvelope,
 ) -> ResponseEnvelope {
+    let reconnect_state = match transport.reconnect_suppressions() {
+        Ok(suppressions) if !suppressions.is_empty() => "suppressed".to_string(),
+        Ok(_) => "idle".to_string(),
+        Err(_) => "failed".to_string(),
+    };
     match control
         .ensure_identity_bound_state(local_identity)
         .and_then(|_| control.sync_runtime_sessions(transport))
@@ -720,7 +745,7 @@ fn runtime_status_response(
                 runtime_summary: RuntimeSummary {
                     session_count: state.active_sessions().len(),
                     active_path_count: state.active_sessions().len(),
-                    reconnect_state: "idle".to_string(),
+                    reconnect_state,
                 },
             },
         ),
@@ -1250,6 +1275,17 @@ fn reprobe_summary_line(report: &fabric::NetcheckReprobeReport) -> String {
         report.relay_required,
         report.probe_observations,
         report.path_candidates
+    )
+}
+
+fn authority_reevaluation_summary_line(report: &fabric::AuthorityReevaluationReport) -> String {
+    format!(
+        "reevaluated={} closed={} unchanged={} suppressed={} local_policy_denied={}",
+        report.reevaluated_sessions,
+        report.closed_sessions,
+        report.unchanged_sessions,
+        report.reconnect_suppressions_added,
+        report.local_policy_denied
     )
 }
 

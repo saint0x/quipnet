@@ -10,9 +10,9 @@ use relay::{HttpRelayControl, RelayControl};
 use relaywire::RelayOpenRequest;
 use serde_json::json;
 use transport::{
-    BindSpec, ConnectionHandle, RelayPlan, RoutePlan, RuntimeEvent, RuntimeEventSubject,
-    RuntimeSessionState, SecureTransport, SessionClosureReason, SessionLifecycleTransport,
-    SessionSnapshot, TransportError,
+    BindSpec, ConnectionHandle, ReconnectSuppression, RelayPlan, RoutePlan, RuntimeEvent,
+    RuntimeEventSubject, RuntimeSessionState, SecureTransport, SessionClosureReason,
+    SessionLifecycleTransport, SessionSnapshot, TransportError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +43,7 @@ pub struct QuicTransportAdapter {
     relay_control: Arc<dyn RelayControl>,
     runtime_sessions: Arc<RwLock<BTreeMap<[u8; 16], RuntimeSessionRecord>>>,
     runtime_events: Arc<RwLock<VecDeque<RuntimeEvent>>>,
+    reconnect_suppressions: Arc<RwLock<Vec<ReconnectSuppression>>>,
 }
 
 impl Default for QuicTransportAdapter {
@@ -56,6 +57,7 @@ impl Default for QuicTransportAdapter {
             relay_control: Arc::new(HttpRelayControl),
             runtime_sessions: Arc::new(RwLock::new(BTreeMap::new())),
             runtime_events: Arc::new(RwLock::new(VecDeque::new())),
+            reconnect_suppressions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
@@ -88,6 +90,27 @@ impl SecureTransport for QuicTransportAdapter {
     type Listener = QuicListenerHandle;
 
     async fn connect(&self, route: RoutePlan) -> Result<Self::Connection, TransportError> {
+        if let Some(suppression) =
+            find_reconnect_suppression(self, &route.peer, route.protocol.as_ref(), route.class)
+        {
+            emit_runtime_event(
+                self,
+                "reconnect.suppressed".to_string(),
+                RuntimeEventSubject {
+                    kind: "peer".to_string(),
+                    id: route.peer.to_string(),
+                },
+                json!({
+                    "protocol": route.protocol.as_ref().map(|protocol| protocol.as_str()),
+                    "class": route.class_string(),
+                    "reason": suppression.reason
+                }),
+            );
+            return Err(TransportError::PolicyDenied(format!(
+                "reconnect suppressed: {}",
+                suppression.reason
+            )));
+        }
         let session = session_snapshot_for_route(self, &route)?;
         let alpn_protocol = route.protocol.map(|id| id.as_str().to_string());
         let record = RuntimeSessionRecord {
@@ -187,6 +210,72 @@ impl SessionLifecycleTransport for QuicTransportAdapter {
             .into_iter()
             .rev()
             .collect())
+    }
+
+    fn suppress_reconnect(
+        &self,
+        peer: &model::PeerId,
+        protocol: Option<&model::ProtocolId>,
+        class: model::TrafficClass,
+        reason: String,
+    ) -> Result<(), TransportError> {
+        let mut suppressions = self
+            .reconnect_suppressions
+            .write()
+            .expect("reconnect suppression registry should remain writable");
+        if let Some(existing) = suppressions.iter_mut().find(|entry| {
+            &entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class
+        }) {
+            existing.reason = reason.clone();
+            existing.imposed_at_unix_secs = current_unix_secs();
+        } else {
+            suppressions.push(ReconnectSuppression {
+                peer: peer.clone(),
+                protocol: protocol.cloned(),
+                class,
+                reason: reason.clone(),
+                imposed_at_unix_secs: current_unix_secs(),
+            });
+        }
+        drop(suppressions);
+        emit_runtime_event(
+            self,
+            "reconnect.suppressed".to_string(),
+            RuntimeEventSubject {
+                kind: "peer".to_string(),
+                id: peer.to_string(),
+            },
+            json!({
+                "protocol": protocol.map(|protocol| protocol.as_str()),
+                "class": class_label(class),
+                "reason": reason
+            }),
+        );
+        Ok(())
+    }
+
+    fn clear_reconnect_suppression(
+        &self,
+        peer: &model::PeerId,
+        protocol: Option<&model::ProtocolId>,
+        class: model::TrafficClass,
+    ) -> Result<(), TransportError> {
+        let mut suppressions = self
+            .reconnect_suppressions
+            .write()
+            .expect("reconnect suppression registry should remain writable");
+        suppressions.retain(|entry| {
+            !(&entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class)
+        });
+        Ok(())
+    }
+
+    fn reconnect_suppressions(&self) -> Result<Vec<ReconnectSuppression>, TransportError> {
+        Ok(self
+            .reconnect_suppressions
+            .read()
+            .expect("reconnect suppression registry should remain readable")
+            .clone())
     }
 
     async fn migrate(
@@ -559,6 +648,23 @@ fn emit_runtime_event(
     }
 }
 
+fn find_reconnect_suppression(
+    adapter: &QuicTransportAdapter,
+    peer: &model::PeerId,
+    protocol: Option<&model::ProtocolId>,
+    class: model::TrafficClass,
+) -> Option<ReconnectSuppression> {
+    adapter
+        .reconnect_suppressions
+        .read()
+        .expect("reconnect suppression registry should remain readable")
+        .iter()
+        .find(|entry| {
+            &entry.peer == peer && entry.protocol.as_ref() == protocol && entry.class == class
+        })
+        .cloned()
+}
+
 fn runtime_event_type_for_state(state: &RuntimeSessionState) -> &'static str {
     match state {
         RuntimeSessionState::Closing => "session.closing",
@@ -596,6 +702,15 @@ fn path_class_label(path_kind: model::PathKind) -> &'static str {
     match path_kind {
         model::PathKind::Relay => "relay",
         _ => "direct",
+    }
+}
+
+fn class_label(class: model::TrafficClass) -> &'static str {
+    match class {
+        model::TrafficClass::Control => "control",
+        model::TrafficClass::Interactive => "interactive",
+        model::TrafficClass::Bulk => "bulk",
+        model::TrafficClass::Background => "background",
     }
 }
 
@@ -887,6 +1002,46 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == "session.state_changed"));
+    }
+
+    #[tokio::test]
+    async fn adapter_blocks_suppressed_reconnect_attempts() {
+        let local_identity = IdentityKeypair::from_secret_bytes([91_u8; 32]);
+        let local = local_identity.peer_id();
+        let adapter = QuicTransportAdapter::with_identity(
+            NetworkId::derive("suppression-test"),
+            local_identity,
+        );
+        let peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"peer-suppressed");
+        let protocol = ProtocolId::new("/quicnet/control/1").unwrap();
+        adapter
+            .suppress_reconnect(
+                &peer,
+                Some(&protocol),
+                TrafficClass::Interactive,
+                "policy denied reconnect".to_string(),
+            )
+            .unwrap();
+
+        let error = adapter
+            .connect(RoutePlan {
+                local_peer: local,
+                peer: peer.clone(),
+                protocol: Some(protocol),
+                class: TrafficClass::Interactive,
+                path_kind: PathKind::DirectUdp,
+                source: RouteSource::Observed,
+                remote_endpoints: vec!["quic://198.51.100.10:8443".to_string()],
+                relay: None,
+            })
+            .await
+            .expect_err("suppressed reconnect should be blocked");
+
+        assert!(error.to_string().contains("reconnect suppressed"));
+        let events = adapter.recent_events(8).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "reconnect.suppressed"));
     }
 
     #[tokio::test]

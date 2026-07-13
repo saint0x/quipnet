@@ -165,6 +165,15 @@ pub struct SessionReconcileReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorityReevaluationReport {
+    pub reevaluated_sessions: usize,
+    pub closed_sessions: usize,
+    pub unchanged_sessions: usize,
+    pub reconnect_suppressions_added: usize,
+    pub local_policy_denied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DurableStateValidationReport {
     pub schema_version: u64,
     pub state_path: PathBuf,
@@ -1292,6 +1301,70 @@ impl LocalControlPlane {
         T: SessionLifecycleTransport,
     {
         transport.recent_events(limit).map_err(Into::into)
+    }
+
+    pub async fn reevaluate_runtime_authority<T>(
+        &self,
+        transport: &T,
+    ) -> Result<AuthorityReevaluationReport, DaemonStateError>
+    where
+        T: SessionLifecycleTransport,
+    {
+        let state = self.ensure_state()?;
+        let sessions = transport.active_sessions()?;
+        let local_policy_denied = state.deny_reason(&state.local_peer_id).is_some();
+        let mut reevaluated_sessions = 0;
+        let mut closed_sessions = 0;
+        let mut unchanged_sessions = 0;
+        let mut reconnect_suppressions_added = 0;
+
+        for session in sessions {
+            let Some(protocol) = session.protocol.clone() else {
+                continue;
+            };
+            reevaluated_sessions += 1;
+            let policy = state.explain_policy(&session.peer, &protocol);
+            if local_policy_denied || !policy.allowed {
+                let reason = if local_policy_denied {
+                    state
+                        .deny_reason(&state.local_peer_id)
+                        .unwrap_or("local membership denied")
+                        .to_string()
+                } else {
+                    policy.reason.clone()
+                };
+                transport.suppress_reconnect(
+                    &session.peer,
+                    Some(&protocol),
+                    session.class,
+                    reason.clone(),
+                )?;
+                reconnect_suppressions_added += 1;
+                let _ = transport.update_session_state(
+                    &session.session_id,
+                    RuntimeSessionState::Closing,
+                    Some(SessionClosureReason::PolicyRejected),
+                    Some(reason),
+                )?;
+                transport.close_session(&session).await?;
+                closed_sessions += 1;
+            } else {
+                transport.clear_reconnect_suppression(
+                    &session.peer,
+                    Some(&protocol),
+                    session.class,
+                )?;
+                unchanged_sessions += 1;
+            }
+        }
+
+        Ok(AuthorityReevaluationReport {
+            reevaluated_sessions,
+            closed_sessions,
+            unchanged_sessions,
+            reconnect_suppressions_added,
+            local_policy_denied,
+        })
     }
 
     pub fn explain_policy(
@@ -3060,6 +3133,60 @@ mod tests {
         assert!(report.entries[0].reason.contains("policy denied session"));
         assert!(persisted.active_sessions.is_empty());
         assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let _ = std::fs::remove_file(state_path);
+        clear_registry();
+    }
+
+    #[tokio::test]
+    async fn authority_reevaluation_closes_denied_session_and_suppresses_reconnect() {
+        let _guard = relay_test_lock();
+        let state_path = unique_state_path("quicnet-authority-reevaluation-close-state");
+        let (control, transport, session, relay_peer) = establish_persisted_relay_session(
+            "authority-reevaluation-close-prod",
+            &state_path,
+            93,
+            94,
+            b"authority-reevaluation-runtime",
+            b"authority-reevaluation-target",
+        )
+        .await;
+
+        let mut updated = DaemonState::load(&state_path).expect("persisted state should load");
+        updated.capability_grants.clear();
+        updated
+            .save(&state_path)
+            .expect("updated state should persist");
+
+        let report = control
+            .reevaluate_runtime_authority(&transport)
+            .await
+            .expect("authority reevaluation should succeed");
+
+        assert_eq!(report.reevaluated_sessions, 1);
+        assert_eq!(report.closed_sessions, 1);
+        assert_eq!(report.reconnect_suppressions_added, 1);
+        assert!(transport
+            .session_snapshot(&session.session_id)
+            .expect("runtime lookup should succeed")
+            .is_none());
+        let suppressions = transport
+            .reconnect_suppressions()
+            .expect("suppression lookup should succeed");
+        assert_eq!(suppressions.len(), 1);
+        assert_eq!(suppressions[0].peer, session.peer);
+        assert_eq!(registered_session_count(&relay_peer), Some(0));
+
+        let denied = control
+            .realize_best_path(
+                &session.peer,
+                &session.protocol.clone().expect("protocol should exist"),
+                session.class,
+                &transport,
+            )
+            .await
+            .expect_err("suppressed reconnect should deny reestablishment");
+        assert!(denied.to_string().contains("policy denied"));
 
         let _ = std::fs::remove_file(state_path);
         clear_registry();
