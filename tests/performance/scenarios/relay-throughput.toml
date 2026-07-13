@@ -1,0 +1,7 @@
+name = "relay-throughput"
+description = "Performance harness placeholder for relay-first versus direct-routing throughput comparisons."
+
+[matrix]
+paths = ["direct-ipv6", "direct-ipv4", "relay"]
+payload_classes = ["control", "bulk"]
+

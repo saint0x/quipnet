@@ -1,0 +1,13 @@
+[package]
+name = "bootstrap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap.workspace = true
+observability = { path = "../../crates/observability" }
+membership = { path = "../../crates/membership" }
+model = { path = "../../crates/model" }
+serde.workspace = true

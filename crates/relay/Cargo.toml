@@ -1,0 +1,19 @@
+[package]
+name = "relay"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+crypto = { path = "../crypto" }
+identity = { path = "../identity" }
+rand.workspace = true
+relaywire = { path = "../relaywire" }
+model = { path = "../model" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq = { version = "2.10.1", features = ["json"] }

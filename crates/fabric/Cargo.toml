@@ -1,0 +1,34 @@
+[package]
+name = "fabric"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+observability = { path = "../observability" }
+discovery = { path = "../discovery" }
+netcheck = { path = "../netcheck" }
+routing = { path = "../routing" }
+policy = { path = "../policy" }
+peerstore = { path = "../peerstore" }
+protocol = { path = "../protocol" }
+records = { path = "../records" }
+scheduler = { path = "../scheduler" }
+transport = { path = "../transport" }
+model = { path = "../model" }
+control = { path = "../control" }
+membership = { path = "../membership" }
+crypto = { path = "../crypto" }
+relaywire = { path = "../relaywire" }
+
+[dev-dependencies]
+membership = { path = "../membership" }
+quic = { path = "../quic" }
+relay = { path = "../relay" }
+tokio.workspace = true

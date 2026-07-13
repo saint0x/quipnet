@@ -1,0 +1,1947 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use control::{AuthorityArtifactSnapshot, ControlClient};
+use membership::{CapabilityGrant, MembershipCertificate, RevocationRecord, RevocationTarget};
+use relaywire::{RelayAnnouncement, RelayMap};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub use discovery::{BootstrapHint, BootstrapIngestReport, DiscoveryService};
+pub use model::*;
+pub use netcheck::{NatType, NetcheckReport, ProbeObservation, ProbeStatus};
+pub use observability::*;
+pub use peerstore::{
+    PeerInspection, PeerReachability, PeerSnapshot, PeerSource, PeerStatus, PeerStore,
+};
+pub use policy::*;
+pub use protocol::*;
+pub use records::*;
+pub use routing::{
+    select_best_path, PathCandidate, PathDecision, PathExplanation, PathScoreBreakdown, PathSource,
+};
+pub use scheduler::*;
+pub use transport::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DaemonRole {
+    Bootstrap,
+    Relay,
+    Observer,
+    Edge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonConfig {
+    pub network: String,
+    pub state_path: PathBuf,
+    pub roles: Vec<DaemonRole>,
+}
+
+impl DaemonConfig {
+    pub fn new(network: impl Into<String>, state_path: impl Into<PathBuf>) -> Self {
+        Self {
+            network: network.into(),
+            state_path: state_path.into(),
+            roles: vec![DaemonRole::Edge, DaemonRole::Observer],
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DaemonStateError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("peer {0} was not found in daemon state")]
+    PeerNotFound(String),
+    #[error("authority snapshot network does not match configured network")]
+    NetworkMismatch,
+    #[error("authority snapshot did not contain a membership certificate")]
+    MissingMembership,
+    #[error("control-plane merge failed: {0}")]
+    Control(#[from] control::ControlError),
+    #[error("no route is available for peer {0}")]
+    NoRoute(PeerId),
+    #[error("transport policy denied request: {0}")]
+    PolicyDenied(String),
+    #[error("transport execution failed: {0}")]
+    Transport(#[from] transport::TransportError),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapEndpoint {
+    pub peer: Option<PeerId>,
+    pub addresses: Vec<String>,
+    pub protocols: Vec<String>,
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeniedPeer {
+    pub peer: PeerId,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DaemonState {
+    pub network: String,
+    pub local_peer_id: PeerId,
+    pub roles: Vec<DaemonRole>,
+    pub membership: MembershipCertificate,
+    pub capability_grants: Vec<CapabilityGrant>,
+    pub revocations: Vec<RevocationRecord>,
+    pub denied_peers: Vec<DeniedPeer>,
+    pub bootstrap: Vec<BootstrapEndpoint>,
+    #[serde(default)]
+    pub relay_map: Option<RelayMap>,
+    pub peers: Vec<PeerInspection>,
+    pub netcheck: NetcheckReport,
+    pub queue_policies: Vec<QueuePolicy>,
+    #[serde(default)]
+    pub active_sessions: Vec<SessionSnapshot>,
+    pub path_candidates: Vec<PathCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateSyncReport {
+    pub membership_changed: bool,
+    pub grants_added: usize,
+    pub revocations_added: usize,
+    pub bootstrap_hints_added: usize,
+    pub relay_announcements_added: usize,
+}
+
+impl DaemonState {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, DaemonStateError> {
+        Ok(serde_json::from_slice(&fs::read(path)?)?)
+    }
+
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), DaemonStateError> {
+        if let Some(parent) = path.as_ref().parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_vec_pretty(self)?)?;
+        Ok(())
+    }
+
+    pub fn peer(&self, peer: &PeerId) -> Option<&PeerInspection> {
+        self.peers.iter().find(|entry| &entry.snapshot.peer == peer)
+    }
+
+    pub fn status_line(&self) -> String {
+        format!(
+            "network={} local_peer={} roles={} bootstrap={} relays={} peers={} revocations={} denied={} sessions={} relay_required={}",
+            self.network,
+            self.local_peer_id,
+            self.roles.len(),
+            self.bootstrap.len(),
+            self.relay_count(),
+            self.peers.len(),
+            self.revocations.len(),
+            self.denied_peers.len(),
+            self.active_sessions.len(),
+            self.netcheck.relay_required()
+        )
+    }
+
+    pub fn best_path(&self, peer: &PeerId, class: TrafficClass) -> Option<PathDecision> {
+        let candidates = self
+            .path_candidates
+            .iter()
+            .filter(|candidate| &candidate.peer == peer)
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::select_best_path(&candidates, class)
+    }
+
+    pub fn first_peer(&self) -> Option<&PeerInspection> {
+        self.peers.first()
+    }
+
+    pub fn active_sessions(&self) -> &[SessionSnapshot] {
+        &self.active_sessions
+    }
+
+    pub fn grants_for_peer(&self, peer: &PeerId) -> Vec<CapabilityGrant> {
+        self.capability_grants
+            .iter()
+            .filter(|grant| &grant.subject_peer_id == peer)
+            .filter(|grant| !self.is_capability_revoked(&grant.subject_peer_id, grant.sequence))
+            .cloned()
+            .collect()
+    }
+
+    pub fn deny_reason(&self, peer: &PeerId) -> Option<&str> {
+        self.denied_peers
+            .iter()
+            .find(|entry| &entry.peer == peer)
+            .map(|entry| entry.reason.as_str())
+    }
+
+    pub fn explain_policy(&self, peer: &PeerId, protocol: &ProtocolId) -> Decision {
+        if let Some(reason) = self.deny_reason(peer) {
+            return Decision {
+                allowed: false,
+                reason: reason.to_string(),
+            };
+        }
+
+        let grants = self.grants_for_peer(&self.local_peer_id);
+        let engine = PolicyEngine::with_rules(vec![PolicyRule {
+            effect: Effect::Allow,
+            network_id: Some(NetworkId::derive(&self.network)),
+            protocol: Some(protocol.clone()),
+            source_peer: Some(self.local_peer_id.clone()),
+            required_capability: Some(protocol_capability(protocol)),
+        }]);
+        let decision = engine.evaluate(
+            &NetworkId::derive(&self.network),
+            &self.local_peer_id,
+            protocol,
+            &grants,
+        );
+
+        if decision.allowed {
+            Decision {
+                allowed: true,
+                reason: format!("{} using {} active grant(s)", decision.reason, grants.len()),
+            }
+        } else if grants.is_empty() {
+            Decision {
+                allowed: false,
+                reason: format!("no active capability grants for {}", protocol.as_str()),
+            }
+        } else {
+            decision
+        }
+    }
+
+    pub fn authority_snapshot(&self) -> AuthorityArtifactSnapshot {
+        AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(&self.network),
+            enrollment_token: None,
+            membership: Some(self.membership.clone()),
+            capability_grants: self.capability_grants.clone(),
+            revocations: self.revocations.clone(),
+            bootstrap_hints: self
+                .bootstrap
+                .iter()
+                .map(|endpoint| membership::BootstrapHint {
+                    peer_id: endpoint.peer.clone(),
+                    addresses: endpoint.addresses.clone(),
+                    metadata: endpoint.metadata.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn relay_count(&self) -> usize {
+        self.relay_map
+            .as_ref()
+            .map(|relay_map| relay_map.relays.len())
+            .unwrap_or(0)
+    }
+
+    pub fn relay_announcements(&self) -> &[RelayAnnouncement] {
+        self.relay_map
+            .as_ref()
+            .map(|relay_map| relay_map.relays.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn max_revocation_sequence(&self) -> Option<u64> {
+        self.revocations
+            .iter()
+            .map(|revocation| revocation.sequence)
+            .max()
+    }
+
+    pub fn apply_revocations(&self, incoming: Vec<RevocationRecord>) -> (Self, usize) {
+        let mut state = self.clone();
+        let mut added = 0;
+
+        for revocation in incoming {
+            if !state.revocations.iter().any(|existing| {
+                existing.sequence == revocation.sequence
+                    && existing.issuer_peer_id == revocation.issuer_peer_id
+                    && existing.target == revocation.target
+            }) {
+                state.revocations.push(revocation);
+                added += 1;
+            }
+        }
+
+        state.denied_peers = denied_peers(&state.membership, &state.revocations);
+        (state, added)
+    }
+
+    pub fn apply_relay_map(&self, incoming: RelayMap) -> (Self, usize) {
+        let current = self.relay_map.as_ref();
+        if current.is_some_and(|existing| existing.version > incoming.version) {
+            return (self.clone(), 0);
+        }
+
+        let added = incoming
+            .relays
+            .iter()
+            .filter(|relay| {
+                !current.is_some_and(|existing| {
+                    existing
+                        .relays
+                        .iter()
+                        .any(|known| known.peer_id == relay.peer_id)
+                })
+            })
+            .count();
+        let relay_peers = relay_peers(&incoming);
+        let mut state = self.clone();
+        state.relay_map = Some(incoming);
+        state.peers = merge_relay_peers(&state.peers, &relay_peers);
+        state.path_candidates = merged_path_candidates(&state);
+        (state, added)
+    }
+
+    pub fn route_plan(
+        &self,
+        peer: &PeerId,
+        protocol: Option<ProtocolId>,
+        class: TrafficClass,
+    ) -> Result<RoutePlan, DaemonStateError> {
+        let decision = self
+            .best_path(peer, class)
+            .ok_or_else(|| DaemonStateError::NoRoute(peer.clone()))?;
+        let inspection = self
+            .peer(peer)
+            .ok_or_else(|| DaemonStateError::PeerNotFound(peer.to_text()))?;
+        let remote_endpoints =
+            route_endpoints(&inspection.snapshot.addresses, decision.selected.path_kind);
+        let relay = if decision.selected.path_kind == PathKind::Relay {
+            let relay_peer = decision
+                .selected
+                .relay_peer
+                .as_ref()
+                .ok_or_else(|| DaemonStateError::NoRoute(peer.clone()))?;
+            let relay = self
+                .relay_announcements()
+                .iter()
+                .find(|candidate| &candidate.peer_id == relay_peer)
+                .ok_or_else(|| DaemonStateError::NoRoute(peer.clone()))?;
+            Some(RelayPlan {
+                relay_peer: relay_peer.clone(),
+                relay_endpoints: route_endpoints(
+                    &relay.advertised_endpoints,
+                    relay_path_kind(relay),
+                ),
+                relay_control_endpoint: relay.control_endpoint.clone(),
+                destination_endpoints: remote_endpoints.clone(),
+                supports_datagrams: relay.supports_quic_datagrams,
+                supports_path_migration: relay.supports_path_migration,
+            })
+        } else {
+            None
+        };
+
+        Ok(RoutePlan {
+            local_peer: self.local_peer_id.clone(),
+            peer: peer.clone(),
+            protocol,
+            class,
+            path_kind: decision.selected.path_kind,
+            source: route_source(&decision.selected.source),
+            remote_endpoints,
+            relay,
+        })
+    }
+
+    pub fn with_active_session(&self, session: SessionSnapshot) -> Self {
+        let mut state = self.clone();
+        if let Some(existing) = state
+            .active_sessions
+            .iter_mut()
+            .find(|existing| existing.session_id == session.session_id)
+        {
+            *existing = session;
+        } else {
+            state.active_sessions.push(session);
+        }
+        state
+    }
+
+    pub fn sync_authority_snapshot(
+        &self,
+        client: &ControlClient,
+        incoming: AuthorityArtifactSnapshot,
+    ) -> Result<(Self, StateSyncReport), DaemonStateError> {
+        let (merged, delta) = client.merge_snapshot(Some(self.authority_snapshot()), incoming)?;
+        let membership = merged
+            .membership
+            .ok_or(DaemonStateError::MissingMembership)?;
+        let bootstrap = merged
+            .bootstrap_hints
+            .into_iter()
+            .map(bootstrap_endpoint_from_hint)
+            .collect::<Vec<_>>();
+        let mut state = self.clone();
+        state.local_peer_id = membership.subject_peer_id.clone();
+        state.membership = membership.clone();
+        state.capability_grants = merged.capability_grants;
+        state.revocations = merged.revocations;
+        state.denied_peers = denied_peers(&membership, &state.revocations);
+        state.bootstrap = bootstrap.clone();
+        state.peers = merge_bootstrap_peers(&state.peers, &bootstrap);
+        state.path_candidates = merged_path_candidates(&state);
+        Ok((
+            state,
+            StateSyncReport {
+                membership_changed: delta.membership_changed,
+                grants_added: delta.grants_added,
+                revocations_added: delta.revocations_added,
+                bootstrap_hints_added: delta.bootstrap_hints_added,
+                relay_announcements_added: 0,
+            },
+        ))
+    }
+
+    pub fn from_authority_snapshot(
+        network: &str,
+        roles: Vec<DaemonRole>,
+        snapshot: AuthorityArtifactSnapshot,
+    ) -> Result<Self, DaemonStateError> {
+        if snapshot.network_id != NetworkId::derive(network) {
+            return Err(DaemonStateError::NetworkMismatch);
+        }
+
+        let membership = snapshot
+            .membership
+            .ok_or(DaemonStateError::MissingMembership)?;
+        let capability_grants = snapshot.capability_grants;
+        let revocations = snapshot.revocations;
+        let bootstrap = snapshot
+            .bootstrap_hints
+            .into_iter()
+            .map(bootstrap_endpoint_from_hint)
+            .collect::<Vec<_>>();
+
+        let denied_peers = denied_peers(&membership, &revocations);
+
+        let mut state = Self {
+            network: network.to_string(),
+            local_peer_id: membership.subject_peer_id.clone(),
+            roles,
+            membership,
+            capability_grants,
+            revocations,
+            denied_peers,
+            peers: bootstrap_peers(&bootstrap),
+            bootstrap,
+            relay_map: None,
+            netcheck: pending_netcheck(),
+            queue_policies: default_queue_policies(),
+            active_sessions: Vec::new(),
+            path_candidates: Vec::new(),
+        };
+        state.path_candidates = merged_path_candidates(&state);
+        Ok(state)
+    }
+}
+
+#[derive(Debug)]
+pub struct LocalNode {
+    pub network_id: NetworkId,
+    pub peer_store: PeerStore,
+    pub discovery: DiscoveryService,
+    pub netcheck: NetcheckReport,
+    pub candidate_paths: Vec<PathCandidate>,
+}
+
+impl LocalNode {
+    pub fn fixture(network_name: &str) -> Self {
+        let network_id = NetworkId::derive(network_name);
+        let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"fra-relay-1");
+        let worker_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"worker-17");
+        let bootstrap = vec![
+            BootstrapHint {
+                peer: relay_peer.clone(),
+                addresses: vec!["udp://203.0.113.10:443".to_string()],
+                protocols: vec!["/quicnet/relay/1".to_string()],
+            },
+            BootstrapHint {
+                peer: worker_peer.clone(),
+                addresses: vec!["udp://198.51.100.24:8443".to_string()],
+                protocols: vec![
+                    "/quicnet/control/1".to_string(),
+                    "/quicnet/records/1".to_string(),
+                ],
+            },
+        ];
+
+        let discovery = DiscoveryService::with_bootstrap(bootstrap);
+        let mut peer_store = PeerStore::default();
+        discovery.ingest_bootstrap(&mut peer_store, 1_720_000_000);
+        peer_store.upsert_peer_with_status(
+            PeerSnapshot {
+                peer: worker_peer.clone(),
+                protocols: vec![
+                    "/quicnet/control/1".to_string(),
+                    "/quicnet/records/1".to_string(),
+                ],
+                addresses: vec!["udp://198.51.100.24:8443".to_string()],
+            },
+            PeerStatus {
+                source: PeerSource::Discovery,
+                reachability: PeerReachability::Direct,
+                last_seen_unix_secs: Some(1_720_000_120),
+            },
+        );
+
+        Self {
+            network_id,
+            peer_store,
+            discovery,
+            netcheck: NetcheckReport {
+                nat_type: NatType::RestrictedCone,
+                udp_reachable: true,
+                ipv6_reachable: true,
+                hairpin_supported: true,
+                public_udp_addr: Some("198.51.100.24:8443".to_string()),
+                port_mapped: false,
+                probe_observations: vec![
+                    ProbeObservation {
+                        vantage: "nyc-observer-1".to_string(),
+                        status: ProbeStatus::Passed,
+                        latency_ms: Some(12),
+                        detail: "reflexive candidate validated".to_string(),
+                    },
+                    ProbeObservation {
+                        vantage: "fra-observer-1".to_string(),
+                        status: ProbeStatus::Passed,
+                        latency_ms: Some(24),
+                        detail: "ipv6 direct candidate validated".to_string(),
+                    },
+                ],
+            },
+            candidate_paths: vec![
+                PathCandidate {
+                    peer: worker_peer.clone(),
+                    path_kind: PathKind::DirectIpv6,
+                    relay_peer: None,
+                    source: PathSource::Observed,
+                    traffic_classes: vec![TrafficClass::Interactive, TrafficClass::Control],
+                    rtt_ms: 13,
+                    jitter_ms: 1,
+                    loss_pct: 0.1,
+                    throughput_mbps: 780,
+                    relay_penalty: 0,
+                },
+                PathCandidate {
+                    peer: worker_peer,
+                    path_kind: PathKind::Relay,
+                    relay_peer: Some(relay_peer.clone()),
+                    source: PathSource::Observed,
+                    traffic_classes: vec![TrafficClass::Interactive, TrafficClass::Bulk],
+                    rtt_ms: 24,
+                    jitter_ms: 4,
+                    loss_pct: 0.3,
+                    throughput_mbps: 1_200,
+                    relay_penalty: 25,
+                },
+            ],
+        }
+    }
+
+    pub fn status_line(&self) -> String {
+        format!(
+            "network={} peers={} bootstrap_candidates={} {}",
+            self.network_id,
+            self.peer_store.peers().len(),
+            self.discovery.bootstrap_candidates().len(),
+            self.netcheck.summary()
+        )
+    }
+
+    pub fn peers(&self) -> Vec<PeerInspection> {
+        self.peer_store.peers()
+    }
+
+    pub fn best_path_for(&self, class: TrafficClass) -> Option<PathDecision> {
+        crate::select_best_path(&self.candidate_paths, class)
+    }
+}
+
+pub fn fixture_daemon_state(network: &str) -> DaemonState {
+    let node = LocalNode::fixture(network);
+    let authority = crypto::IdentityKeypair::from_secret_bytes([11_u8; 32]);
+    let local_identity = crypto::IdentityKeypair::from_secret_bytes([12_u8; 32]);
+    let local_peer_id = local_identity.peer_id();
+    let membership = MembershipCertificate::issue(
+        &authority,
+        NetworkId::derive(network),
+        local_peer_id.clone(),
+        1_720_000_000,
+        1_820_000_000,
+        vec!["member".to_string()],
+    );
+    let bootstrap = node
+        .discovery
+        .bootstrap_candidates()
+        .iter()
+        .cloned()
+        .map(|hint| BootstrapEndpoint {
+            peer: Some(hint.peer),
+            addresses: hint.addresses,
+            protocols: hint.protocols,
+            metadata: BTreeMap::from([("source".to_string(), "fixture".to_string())]),
+        })
+        .collect();
+    let peers = node.peer_store.peers();
+    let netcheck = node.netcheck.clone();
+    let path_candidates = node.candidate_paths.clone();
+
+    DaemonState {
+        network: network.to_string(),
+        local_peer_id,
+        roles: vec![DaemonRole::Edge, DaemonRole::Observer],
+        membership,
+        capability_grants: Vec::new(),
+        revocations: Vec::new(),
+        denied_peers: Vec::new(),
+        bootstrap,
+        relay_map: Some(RelayMap {
+            version: 1,
+            generated_at: 1_720_000_000,
+            relays: vec![RelayAnnouncement {
+                peer_id: PeerId::from_public_key(KeyAlgorithm::Ed25519, b"fra-relay-1"),
+                region: "eu-central-1".to_string(),
+                advertised_endpoints: vec!["udp://203.0.113.10:443".to_string()],
+                control_endpoint: "http://203.0.113.10:9081".to_string(),
+                max_bandwidth_bps: 1_500_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec![
+                    "NetworkControl".to_string(),
+                    "InteractiveRpc".to_string(),
+                    "Background".to_string(),
+                ],
+            }],
+        }),
+        peers,
+        netcheck,
+        queue_policies: default_queue_policies(),
+        active_sessions: Vec::new(),
+        path_candidates,
+    }
+}
+
+#[derive(Debug)]
+pub struct LocalControlPlane {
+    pub config: DaemonConfig,
+}
+
+impl LocalControlPlane {
+    pub fn new(config: DaemonConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn ensure_state(&self) -> Result<DaemonState, DaemonStateError> {
+        if self.config.state_path.exists() {
+            let mut state = DaemonState::load(&self.config.state_path)?;
+            state.roles = self.config.roles.clone();
+            state.path_candidates = merged_path_candidates(&state);
+            Ok(state)
+        } else {
+            let mut state = fixture_daemon_state(&self.config.network);
+            state.roles = self.config.roles.clone();
+            state.path_candidates = merged_path_candidates(&state);
+            state.save(&self.config.state_path)?;
+            Ok(state)
+        }
+    }
+
+    pub fn refresh_and_persist(&self) -> Result<DaemonState, DaemonStateError> {
+        let state = self.ensure_state()?;
+        state.save(&self.config.state_path)?;
+        Ok(state)
+    }
+
+    pub fn seed_from_authority_snapshot(
+        &self,
+        snapshot_path: impl AsRef<Path>,
+    ) -> Result<DaemonState, DaemonStateError> {
+        let snapshot = load_authority_snapshot(snapshot_path)?;
+        let mut state = DaemonState::from_authority_snapshot(
+            &self.config.network,
+            self.config.roles.clone(),
+            snapshot,
+        )?;
+        state.path_candidates = merged_path_candidates(&state);
+        state.save(&self.config.state_path)?;
+        Ok(state)
+    }
+
+    pub fn sync_authority_snapshot(
+        &self,
+        snapshot_path: impl AsRef<Path>,
+    ) -> Result<(DaemonState, StateSyncReport), DaemonStateError> {
+        let snapshot = load_authority_snapshot(snapshot_path)?;
+        let state = if self.config.state_path.exists() {
+            let mut state = DaemonState::load(&self.config.state_path)?;
+            state.roles = self.config.roles.clone();
+            state
+        } else {
+            let mut state = DaemonState::from_authority_snapshot(
+                &self.config.network,
+                self.config.roles.clone(),
+                snapshot,
+            )?;
+            state.path_candidates = merged_path_candidates(&state);
+            let report = StateSyncReport {
+                membership_changed: true,
+                grants_added: state.capability_grants.len(),
+                revocations_added: state.revocations.len(),
+                bootstrap_hints_added: state.bootstrap.len(),
+                relay_announcements_added: 0,
+            };
+            state.save(&self.config.state_path)?;
+            return Ok((state, report));
+        };
+        let client = ControlClient {
+            network_id: NetworkId::derive(&self.config.network),
+            endpoints: control::AuthorityEndpoints {
+                enrollment: "local://enroll".to_string(),
+                revocation: "local://revoke".to_string(),
+                relay_map: "local://relays".to_string(),
+                bootstrap: "local://bootstrap".to_string(),
+                snapshot: "local://snapshot".to_string(),
+            },
+        };
+        let (state, report) = state.sync_authority_snapshot(&client, snapshot)?;
+        state.save(&self.config.state_path)?;
+        Ok((state, report))
+    }
+
+    pub fn seed_from_authority_origin(
+        &self,
+        origin: &str,
+        subject: Option<&str>,
+    ) -> Result<DaemonState, DaemonStateError> {
+        let client = authority_client(&self.config.network, origin);
+        let snapshot = client.fetch_authority_snapshot_for(subject)?;
+        let relay_map = client.fetch_relay_map()?;
+        let mut state = DaemonState::from_authority_snapshot(
+            &self.config.network,
+            self.config.roles.clone(),
+            snapshot,
+        )?;
+        state.path_candidates = merged_path_candidates(&state);
+        let (state, _) = state.apply_relay_map(relay_map);
+        state.save(&self.config.state_path)?;
+        Ok(state)
+    }
+
+    pub fn sync_authority_origin(
+        &self,
+        origin: &str,
+        subject: Option<&str>,
+    ) -> Result<(DaemonState, StateSyncReport), DaemonStateError> {
+        let client = authority_client(&self.config.network, origin);
+        let snapshot = client.fetch_authority_snapshot_for(subject)?;
+        let relay_map = client.fetch_relay_map()?;
+        let state = if self.config.state_path.exists() {
+            let mut state = DaemonState::load(&self.config.state_path)?;
+            state.roles = self.config.roles.clone();
+            state
+        } else {
+            let mut state = DaemonState::from_authority_snapshot(
+                &self.config.network,
+                self.config.roles.clone(),
+                snapshot,
+            )?;
+            state.path_candidates = merged_path_candidates(&state);
+            let (state, relay_announcements_added) = state.apply_relay_map(relay_map);
+            let report = StateSyncReport {
+                membership_changed: true,
+                grants_added: state.capability_grants.len(),
+                revocations_added: state.revocations.len(),
+                bootstrap_hints_added: state.bootstrap.len(),
+                relay_announcements_added,
+            };
+            state.save(&self.config.state_path)?;
+            return Ok((state, report));
+        };
+        let (state, report) = state.sync_authority_snapshot(&client, snapshot)?;
+        let (state, relay_announcements_added) = state.apply_relay_map(relay_map);
+        state.save(&self.config.state_path)?;
+        Ok((
+            state,
+            StateSyncReport {
+                relay_announcements_added,
+                ..report
+            },
+        ))
+    }
+
+    pub fn sync_authority_revocations_origin(
+        &self,
+        origin: &str,
+    ) -> Result<(DaemonState, usize), DaemonStateError> {
+        let mut state = self.ensure_state()?;
+        state.roles = self.config.roles.clone();
+        let client = authority_client(&self.config.network, origin);
+        let revocations = client.fetch_revocations(state.max_revocation_sequence())?;
+        let (state, added) = state.apply_revocations(revocations);
+        state.save(&self.config.state_path)?;
+        Ok((state, added))
+    }
+
+    pub fn inspect_peer(
+        &self,
+        peer: &PeerId,
+    ) -> Result<(PeerInspection, Option<PathDecision>), DaemonStateError> {
+        let state = self.ensure_state()?;
+        let inspection = state
+            .peer(peer)
+            .cloned()
+            .ok_or_else(|| DaemonStateError::PeerNotFound(peer.to_text()))?;
+        let routing = state.best_path(peer, TrafficClass::Interactive);
+        Ok((inspection, routing))
+    }
+
+    pub fn session_snapshots(&self) -> Result<Vec<SessionSnapshot>, DaemonStateError> {
+        Ok(self.ensure_state()?.active_sessions.clone())
+    }
+
+    pub async fn realize_best_path<T>(
+        &self,
+        peer: &PeerId,
+        protocol: &ProtocolId,
+        class: TrafficClass,
+        transport: &T,
+    ) -> Result<SessionSnapshot, DaemonStateError>
+    where
+        T: SecureTransport,
+    {
+        let state = self.ensure_state()?;
+        let policy = state.explain_policy(peer, protocol);
+        if !policy.allowed {
+            return Err(DaemonStateError::PolicyDenied(policy.reason));
+        }
+        let route = state.route_plan(peer, Some(protocol.clone()), class)?;
+        let connection = transport.connect(route).await?;
+        let session = connection.snapshot();
+        let state = state.with_active_session(session.clone());
+        state.save(&self.config.state_path)?;
+        Ok(session)
+    }
+
+    pub fn explain_policy(
+        &self,
+        peer: &PeerId,
+        protocol: &ProtocolId,
+    ) -> Result<Decision, DaemonStateError> {
+        let state = self.ensure_state()?;
+        Ok(state.explain_policy(peer, protocol))
+    }
+}
+
+fn load_authority_snapshot(
+    snapshot_path: impl AsRef<Path>,
+) -> Result<AuthorityArtifactSnapshot, DaemonStateError> {
+    Ok(serde_json::from_slice::<AuthorityArtifactSnapshot>(
+        &fs::read(snapshot_path.as_ref())?,
+    )?)
+}
+
+fn authority_client(network: &str, origin: &str) -> ControlClient {
+    ControlClient::from_origin(NetworkId::derive(network), origin)
+}
+
+fn bootstrap_protocols(metadata: &BTreeMap<String, String>) -> Vec<String> {
+    metadata
+        .get("protocols")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                "/quicnet/control/1".to_string(),
+                "/quicnet/records/1".to_string(),
+            ]
+        })
+}
+
+fn bootstrap_endpoint_from_hint(hint: membership::BootstrapHint) -> BootstrapEndpoint {
+    BootstrapEndpoint {
+        peer: hint.peer_id,
+        addresses: hint.addresses,
+        protocols: bootstrap_protocols(&hint.metadata),
+        metadata: hint.metadata,
+    }
+}
+
+fn bootstrap_peers(endpoints: &[BootstrapEndpoint]) -> Vec<PeerInspection> {
+    let mut store = PeerStore::default();
+
+    for endpoint in endpoints {
+        let Some(peer) = endpoint.peer.clone() else {
+            continue;
+        };
+        store.upsert_peer_with_status(
+            PeerSnapshot {
+                peer,
+                protocols: endpoint.protocols.clone(),
+                addresses: endpoint.addresses.clone(),
+            },
+            PeerStatus {
+                source: PeerSource::Bootstrap,
+                reachability: PeerReachability::Unknown,
+                last_seen_unix_secs: None,
+            },
+        );
+    }
+
+    store.peers()
+}
+
+fn merge_bootstrap_peers(
+    existing: &[PeerInspection],
+    bootstrap: &[BootstrapEndpoint],
+) -> Vec<PeerInspection> {
+    let mut store = PeerStore::default();
+
+    for peer in existing {
+        store.upsert_peer_with_status(peer.snapshot.clone(), peer.status.clone());
+    }
+
+    for endpoint in bootstrap {
+        let Some(peer) = endpoint.peer.clone() else {
+            continue;
+        };
+        let snapshot = PeerSnapshot {
+            peer: peer.clone(),
+            protocols: endpoint.protocols.clone(),
+            addresses: endpoint.addresses.clone(),
+        };
+        let status = store.peer_status(&peer).cloned().unwrap_or(PeerStatus {
+            source: PeerSource::Bootstrap,
+            reachability: PeerReachability::Unknown,
+            last_seen_unix_secs: None,
+        });
+        store.upsert_peer_with_status(snapshot, status);
+    }
+
+    store.peers()
+}
+
+fn relay_peers(relay_map: &RelayMap) -> Vec<PeerInspection> {
+    let mut store = PeerStore::default();
+
+    for relay in &relay_map.relays {
+        store.upsert_peer_with_status(
+            PeerSnapshot {
+                peer: relay.peer_id.clone(),
+                protocols: vec!["/quicnet/relay/1".to_string()],
+                addresses: relay.advertised_endpoints.clone(),
+            },
+            PeerStatus {
+                source: PeerSource::RelayMap,
+                reachability: PeerReachability::Unknown,
+                last_seen_unix_secs: Some(relay_map.generated_at),
+            },
+        );
+    }
+
+    store.peers()
+}
+
+fn merge_relay_peers(
+    existing: &[PeerInspection],
+    relays: &[PeerInspection],
+) -> Vec<PeerInspection> {
+    let mut store = PeerStore::default();
+
+    for peer in existing {
+        store.upsert_peer_with_status(peer.snapshot.clone(), peer.status.clone());
+    }
+
+    for relay in relays {
+        let peer_id = relay.snapshot.peer.clone();
+        let status = store.peer_status(&peer_id).cloned().unwrap_or(PeerStatus {
+            source: PeerSource::RelayMap,
+            reachability: PeerReachability::Unknown,
+            last_seen_unix_secs: relay.status.last_seen_unix_secs,
+        });
+        store.upsert_peer_with_status(relay.snapshot.clone(), status);
+    }
+
+    store.peers()
+}
+
+fn merged_path_candidates(state: &DaemonState) -> Vec<PathCandidate> {
+    let mut candidates = state
+        .path_candidates
+        .iter()
+        .filter(|candidate| candidate.source == PathSource::Observed)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for candidate in synthesized_direct_bootstrap_candidates(state) {
+        push_unique_candidate(&mut candidates, candidate);
+    }
+    for candidate in synthesized_relay_candidates(state) {
+        push_unique_candidate(&mut candidates, candidate);
+    }
+
+    candidates
+}
+
+fn push_unique_candidate(candidates: &mut Vec<PathCandidate>, candidate: PathCandidate) {
+    let exists = candidates.iter().any(|existing| {
+        existing.peer == candidate.peer
+            && existing.path_kind == candidate.path_kind
+            && existing.relay_peer == candidate.relay_peer
+            && existing.source == candidate.source
+    });
+    if !exists {
+        candidates.push(candidate);
+    }
+}
+
+fn synthesized_direct_bootstrap_candidates(state: &DaemonState) -> Vec<PathCandidate> {
+    if !state.netcheck.udp_reachable && !state.netcheck.ipv6_reachable {
+        return Vec::new();
+    }
+    state
+        .bootstrap
+        .iter()
+        .filter(|endpoint| endpoint.peer.is_some())
+        .filter(|endpoint| {
+            endpoint
+                .addresses
+                .iter()
+                .any(|address| is_direct_quic_address(address))
+        })
+        .filter_map(|endpoint| {
+            let peer = endpoint.peer.clone()?;
+            Some(PathCandidate {
+                peer,
+                path_kind: endpoint_path_kind(endpoint),
+                relay_peer: None,
+                source: PathSource::Bootstrap,
+                traffic_classes: vec![
+                    TrafficClass::Control,
+                    TrafficClass::Interactive,
+                    TrafficClass::Bulk,
+                    TrafficClass::Background,
+                ],
+                rtt_ms: direct_bootstrap_rtt_ms(&state.netcheck),
+                jitter_ms: direct_bootstrap_jitter_ms(&state.netcheck),
+                loss_pct: direct_bootstrap_loss_pct(&state.netcheck),
+                throughput_mbps: direct_bootstrap_throughput_mbps(&state.netcheck),
+                relay_penalty: 0,
+            })
+        })
+        .collect()
+}
+
+fn synthesized_relay_candidates(state: &DaemonState) -> Vec<PathCandidate> {
+    let Some(relay_map) = &state.relay_map else {
+        return Vec::new();
+    };
+    let relay_peer_ids = relay_map
+        .relays
+        .iter()
+        .map(|relay| relay.peer_id.clone())
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+
+    for relay in &relay_map.relays {
+        candidates.push(PathCandidate {
+            peer: relay.peer_id.clone(),
+            path_kind: relay_path_kind(relay),
+            relay_peer: None,
+            source: PathSource::AuthorityRelay,
+            traffic_classes: relay_traffic_classes(&relay.traffic_classes),
+            rtt_ms: direct_relay_rtt_ms(relay, &state.netcheck),
+            jitter_ms: direct_relay_jitter_ms(&state.netcheck),
+            loss_pct: direct_relay_loss_pct(&state.netcheck),
+            throughput_mbps: relay_direct_throughput_mbps(relay),
+            relay_penalty: 0,
+        });
+    }
+
+    for peer in &state.peers {
+        if relay_peer_ids.contains(&peer.snapshot.peer) {
+            continue;
+        }
+        for relay in &relay_map.relays {
+            candidates.push(PathCandidate {
+                peer: peer.snapshot.peer.clone(),
+                path_kind: PathKind::Relay,
+                relay_peer: Some(relay.peer_id.clone()),
+                source: PathSource::AuthorityRelay,
+                traffic_classes: relay_traffic_classes(&relay.traffic_classes),
+                rtt_ms: relay_fallback_rtt_ms(relay, &state.netcheck),
+                jitter_ms: relay_fallback_jitter_ms(&state.netcheck),
+                loss_pct: relay_fallback_loss_pct(&state.netcheck),
+                throughput_mbps: relay_fallback_throughput_mbps(relay),
+                relay_penalty: 25,
+            });
+        }
+    }
+
+    candidates
+}
+
+fn endpoint_path_kind(endpoint: &BootstrapEndpoint) -> PathKind {
+    if endpoint
+        .addresses
+        .iter()
+        .any(|address| is_ipv6_address(address))
+    {
+        PathKind::DirectIpv6
+    } else {
+        PathKind::DirectUdp
+    }
+}
+
+fn relay_path_kind(relay: &RelayAnnouncement) -> PathKind {
+    if relay
+        .advertised_endpoints
+        .iter()
+        .any(|address| is_ipv6_address(address))
+    {
+        PathKind::DirectIpv6
+    } else {
+        PathKind::DirectUdp
+    }
+}
+
+fn route_source(source: &PathSource) -> RouteSource {
+    match source {
+        PathSource::Observed => RouteSource::Observed,
+        PathSource::Bootstrap => RouteSource::Bootstrap,
+        PathSource::AuthorityRelay => RouteSource::AuthorityRelay,
+    }
+}
+
+fn route_endpoints(addresses: &[String], path_kind: PathKind) -> Vec<String> {
+    let filtered = addresses
+        .iter()
+        .filter(|address| endpoint_matches_path_kind(address, path_kind))
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        addresses.to_vec()
+    } else {
+        filtered
+    }
+}
+
+fn endpoint_matches_path_kind(address: &str, path_kind: PathKind) -> bool {
+    match path_kind {
+        PathKind::DirectIpv6 => is_direct_quic_address(address) && is_ipv6_address(address),
+        PathKind::DirectUdp => is_direct_quic_address(address) && !is_ipv6_address(address),
+        PathKind::Relay => is_direct_quic_address(address),
+        PathKind::Loopback => address.contains("127.0.0.1") || address.contains("://[::1]"),
+        PathKind::Lan => address.contains("192.168.") || address.contains("10.") || address.contains("172.16."),
+    }
+}
+
+fn is_direct_quic_address(address: &str) -> bool {
+    address.starts_with("quic://") || address.starts_with("udp://")
+}
+
+fn is_ipv6_address(address: &str) -> bool {
+    address.contains("://[") || address.matches(':').count() > 2
+}
+
+fn best_probe_latency_ms(netcheck: &NetcheckReport) -> Option<u32> {
+    netcheck
+        .probe_observations
+        .iter()
+        .filter(|observation| observation.status == ProbeStatus::Passed)
+        .filter_map(|observation| observation.latency_ms)
+        .min()
+}
+
+fn direct_bootstrap_rtt_ms(netcheck: &NetcheckReport) -> u32 {
+    best_probe_latency_ms(netcheck).unwrap_or(40)
+}
+
+fn direct_bootstrap_jitter_ms(netcheck: &NetcheckReport) -> u32 {
+    if netcheck.udp_reachable {
+        3
+    } else {
+        12
+    }
+}
+
+fn direct_bootstrap_loss_pct(netcheck: &NetcheckReport) -> f32 {
+    if netcheck.udp_reachable {
+        0.2
+    } else {
+        1.5
+    }
+}
+
+fn direct_bootstrap_throughput_mbps(netcheck: &NetcheckReport) -> u32 {
+    if netcheck.udp_reachable {
+        600
+    } else {
+        120
+    }
+}
+
+fn direct_relay_rtt_ms(relay: &RelayAnnouncement, netcheck: &NetcheckReport) -> u32 {
+    let base =
+        best_probe_latency_ms(netcheck).unwrap_or(if netcheck.udp_reachable { 30 } else { 70 });
+    if relay_path_kind(relay) == PathKind::DirectIpv6 && netcheck.ipv6_reachable {
+        base.saturating_add(5)
+    } else {
+        base.saturating_add(15)
+    }
+}
+
+fn direct_relay_jitter_ms(netcheck: &NetcheckReport) -> u32 {
+    if netcheck.udp_reachable {
+        4
+    } else {
+        14
+    }
+}
+
+fn direct_relay_loss_pct(netcheck: &NetcheckReport) -> f32 {
+    if netcheck.udp_reachable {
+        0.3
+    } else {
+        1.8
+    }
+}
+
+fn relay_direct_throughput_mbps(relay: &RelayAnnouncement) -> u32 {
+    (relay.max_bandwidth_bps / 1_000_000).clamp(100, 5_000) as u32
+}
+
+fn relay_fallback_rtt_ms(relay: &RelayAnnouncement, netcheck: &NetcheckReport) -> u32 {
+    direct_relay_rtt_ms(relay, netcheck)
+        .saturating_mul(2)
+        .saturating_add(20)
+}
+
+fn relay_fallback_jitter_ms(netcheck: &NetcheckReport) -> u32 {
+    direct_relay_jitter_ms(netcheck).saturating_add(5)
+}
+
+fn relay_fallback_loss_pct(netcheck: &NetcheckReport) -> f32 {
+    direct_relay_loss_pct(netcheck) + 0.4
+}
+
+fn relay_fallback_throughput_mbps(relay: &RelayAnnouncement) -> u32 {
+    (relay_direct_throughput_mbps(relay) / 2).max(80)
+}
+
+fn relay_traffic_classes(values: &[String]) -> Vec<TrafficClass> {
+    let mut classes = values
+        .iter()
+        .filter_map(|value| match value.as_str() {
+            "NetworkControl" => Some(TrafficClass::Control),
+            "InteractiveRpc" => Some(TrafficClass::Interactive),
+            "Background" => Some(TrafficClass::Background),
+            "Bulk" => Some(TrafficClass::Bulk),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if classes.is_empty() {
+        classes = vec![TrafficClass::Control, TrafficClass::Interactive];
+    }
+    classes
+}
+
+fn pending_netcheck() -> NetcheckReport {
+    NetcheckReport {
+        nat_type: NatType::Unknown,
+        udp_reachable: false,
+        ipv6_reachable: false,
+        hairpin_supported: false,
+        public_udp_addr: None,
+        port_mapped: false,
+        probe_observations: vec![ProbeObservation {
+            vantage: "local".to_string(),
+            status: ProbeStatus::Pending,
+            latency_ms: None,
+            detail: "netcheck has not run yet".to_string(),
+        }],
+    }
+}
+
+fn denied_peers(
+    membership: &MembershipCertificate,
+    revocations: &[RevocationRecord],
+) -> Vec<DeniedPeer> {
+    revocations
+        .iter()
+        .filter_map(|revocation| match &revocation.target {
+            RevocationTarget::Peer { peer_id } => Some(DeniedPeer {
+                peer: peer_id.clone(),
+                reason: format!(
+                    "peer revoked: {:?} seq={} issuer={}",
+                    revocation.reason, revocation.sequence, revocation.issuer_peer_id
+                ),
+            }),
+            RevocationTarget::MembershipCertificate {
+                subject_peer_id,
+                issued_at,
+            } if subject_peer_id == &membership.subject_peer_id
+                && *issued_at == membership.issued_at =>
+            {
+                Some(DeniedPeer {
+                    peer: subject_peer_id.clone(),
+                    reason: format!(
+                        "membership revoked: {:?} seq={} issuer={}",
+                        revocation.reason, revocation.sequence, revocation.issuer_peer_id
+                    ),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn protocol_capability(protocol: &ProtocolId) -> String {
+    match protocol.as_str() {
+        "/quicnet/records/1" => "records.publish".to_string(),
+        "/quicnet/control/1" => "control.access".to_string(),
+        _ => format!("protocol:{}", protocol.as_str()),
+    }
+}
+
+impl DaemonState {
+    fn is_capability_revoked(&self, peer: &PeerId, sequence: u64) -> bool {
+        self.revocations.iter().any(|revocation| {
+            matches!(
+                &revocation.target,
+                RevocationTarget::CapabilityGrant {
+                    subject_peer_id,
+                    sequence: revoked_sequence,
+                } if subject_peer_id == peer && *revoked_sequence == sequence
+            )
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::collections::BTreeMap;
+
+    use control::AuthorityArtifactSnapshot;
+    use quic::QuicTransportAdapter;
+    use relay::{
+        clear_registry, register_relay, InProcessRelayControl, RelayNode, RelayQuota, RelayService,
+    };
+
+    use super::*;
+
+    #[test]
+    fn fixture_state_exposes_best_path() {
+        let state = fixture_daemon_state("dev");
+        let peer = state
+            .path_candidates
+            .first()
+            .expect("fixture routing candidate should exist")
+            .peer
+            .clone();
+        let decision = state
+            .best_path(&peer, TrafficClass::Interactive)
+            .expect("routing should be selected");
+        assert_eq!(decision.selected.path_kind, PathKind::DirectIpv6);
+    }
+
+    #[test]
+    fn fixture_state_builds_direct_route_plan() {
+        let state = fixture_daemon_state("dev");
+        let peer = state
+            .path_candidates
+            .first()
+            .expect("fixture routing candidate should exist")
+            .peer
+            .clone();
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+
+        let route = state
+            .route_plan(&peer, Some(protocol.clone()), TrafficClass::Interactive)
+            .expect("route plan should build");
+
+        assert_eq!(route.peer, peer);
+        assert_eq!(route.protocol, Some(protocol));
+        assert!(matches!(
+            route.source,
+            RouteSource::Observed | RouteSource::Bootstrap | RouteSource::AuthorityRelay
+        ));
+        assert!(route.relay.is_none());
+        assert!(!route.remote_endpoints.is_empty());
+    }
+
+    #[test]
+    fn control_plane_persists_state() {
+        let temp = std::env::temp_dir().join("quicnet-fabric-state.json");
+        let control = LocalControlPlane::new(DaemonConfig::new("dev", &temp));
+        let state = control.ensure_state().expect("state should be created");
+        assert_eq!(state.network, "dev");
+
+        let loaded = DaemonState::load(&temp).expect("state should be readable");
+        assert_eq!(loaded.network, "dev");
+        let _ = std::fs::remove_file(temp);
+    }
+
+    #[test]
+    fn authority_snapshot_seeds_state() {
+        let authority = crypto::IdentityKeypair::from_secret_bytes([7_u8; 32]);
+        let subject = crypto::IdentityKeypair::from_secret_bytes([8_u8; 32]);
+        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"bootstrap-1");
+        let network = "personalcloud-prod";
+        let snapshot = AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(network),
+            enrollment_token: None,
+            membership: Some(membership::MembershipCertificate::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                100,
+                200,
+                vec!["member".to_string()],
+            )),
+            capability_grants: vec![membership::CapabilityGrant::issue(
+                &authority,
+                NetworkId::derive(network),
+                bootstrap_peer.clone(),
+                vec!["records.publish".to_string()],
+                vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+                membership::ResourceLimits::default(),
+                vec![],
+                100,
+                200,
+                7,
+            )],
+            revocations: vec![membership::RevocationRecord::issue(
+                &authority,
+                NetworkId::derive(network),
+                membership::RevocationTarget::Peer {
+                    peer_id: bootstrap_peer.clone(),
+                },
+                membership::RevocationReason::Administrative,
+                150,
+                150,
+                8,
+                Some("seed rotated".to_string()),
+            )],
+            bootstrap_hints: vec![
+                membership::BootstrapHint {
+                    peer_id: Some(bootstrap_peer.clone()),
+                    addresses: vec!["quic://203.0.113.10:8443".to_string()],
+                    metadata: BTreeMap::from([(
+                        "protocols".to_string(),
+                        "/quicnet/control/1,/quicnet/records/1".to_string(),
+                    )]),
+                },
+                membership::BootstrapHint {
+                    peer_id: None,
+                    addresses: vec!["https://bootstrap.example.invalid:8443".to_string()],
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+
+        let state = DaemonState::from_authority_snapshot(network, vec![DaemonRole::Edge], snapshot)
+            .expect("authority snapshot should seed state");
+        assert_eq!(state.local_peer_id, subject.peer_id());
+        assert_eq!(state.bootstrap.len(), 2);
+        assert_eq!(state.peers.len(), 1);
+        assert_eq!(state.denied_peers.len(), 1);
+        assert!(state.deny_reason(&bootstrap_peer).is_some());
+        assert!(state.path_candidates.is_empty());
+        assert_eq!(
+            state.netcheck.probe_observations[0].status,
+            ProbeStatus::Pending
+        );
+        let decision = state.explain_policy(
+            &bootstrap_peer,
+            &ProtocolId::new("/quicnet/records/1").expect("protocol"),
+        );
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("peer revoked"));
+    }
+
+    #[test]
+    fn snapshot_sync_preserves_runtime_state() {
+        let authority = crypto::IdentityKeypair::from_secret_bytes([13_u8; 32]);
+        let local = crypto::IdentityKeypair::from_secret_bytes([14_u8; 32]);
+        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"sync-bootstrap");
+        let network = "personalcloud-prod";
+        let membership = membership::MembershipCertificate::issue(
+            &authority,
+            NetworkId::derive(network),
+            local.peer_id(),
+            100,
+            300,
+            vec!["member".to_string()],
+        );
+        let mut state = fixture_daemon_state(network);
+        state.local_peer_id = local.peer_id();
+        state.membership = membership.clone();
+        state.netcheck.public_udp_addr = Some("203.0.113.77:8443".to_string());
+        state.path_candidates.push(PathCandidate {
+            peer: bootstrap_peer.clone(),
+            path_kind: PathKind::Relay,
+            relay_peer: Some(PeerId::from_public_key(
+                KeyAlgorithm::Ed25519,
+                b"sync-relay",
+            )),
+            source: PathSource::Observed,
+            traffic_classes: vec![TrafficClass::Control, TrafficClass::Interactive],
+            rtt_ms: 20,
+            jitter_ms: 3,
+            loss_pct: 0.5,
+            throughput_mbps: 500,
+            relay_penalty: 10,
+        });
+
+        let incoming = AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(network),
+            enrollment_token: None,
+            membership: Some(membership),
+            capability_grants: vec![membership::CapabilityGrant::issue(
+                &authority,
+                NetworkId::derive(network),
+                bootstrap_peer.clone(),
+                vec!["records.publish".to_string()],
+                vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+                membership::ResourceLimits::default(),
+                vec![],
+                100,
+                300,
+                1,
+            )],
+            revocations: vec![],
+            bootstrap_hints: vec![membership::BootstrapHint {
+                peer_id: Some(bootstrap_peer.clone()),
+                addresses: vec!["quic://198.51.100.40:8443".to_string()],
+                metadata: BTreeMap::from([(
+                    "protocols".to_string(),
+                    "/quicnet/records/1".to_string(),
+                )]),
+            }],
+        };
+        let client = ControlClient {
+            network_id: NetworkId::derive(network),
+            endpoints: control::AuthorityEndpoints {
+                enrollment: "local://enroll".to_string(),
+                revocation: "local://revoke".to_string(),
+                relay_map: "local://relays".to_string(),
+                bootstrap: "local://bootstrap".to_string(),
+                snapshot: "local://snapshot".to_string(),
+            },
+        };
+
+        let (synced, report) = state
+            .sync_authority_snapshot(&client, incoming)
+            .expect("sync should succeed");
+        assert_eq!(report.grants_added, 1);
+        assert_eq!(
+            synced.netcheck.public_udp_addr.as_deref(),
+            Some("203.0.113.77:8443")
+        );
+        assert!(synced.path_candidates.len() >= state.path_candidates.len());
+        assert!(synced.path_candidates.iter().any(|candidate| {
+            candidate.source == PathSource::Observed && candidate.peer == bootstrap_peer
+        }));
+        assert!(synced.peer(&bootstrap_peer).is_some());
+    }
+
+    #[test]
+    fn explain_policy_uses_local_subject_grants_for_outbound_connects() {
+        let authority = crypto::IdentityKeypair::from_secret_bytes([31_u8; 32]);
+        let local = crypto::IdentityKeypair::from_secret_bytes([32_u8; 32]);
+        let remote = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"remote-policy-target");
+        let network = "personalcloud-prod";
+        let protocol = ProtocolId::new("/quicnet/control/1").expect("protocol");
+        let membership = membership::MembershipCertificate::issue(
+            &authority,
+            NetworkId::derive(network),
+            local.peer_id(),
+            100,
+            300,
+            vec!["member".to_string()],
+        );
+        let grant = membership::CapabilityGrant::issue(
+            &authority,
+            NetworkId::derive(network),
+            local.peer_id(),
+            vec!["control.access".to_string()],
+            vec![protocol.clone()],
+            membership::ResourceLimits::default(),
+            Vec::new(),
+            100,
+            300,
+            1,
+        );
+        let mut state = fixture_daemon_state(network);
+        state.local_peer_id = local.peer_id();
+        state.membership = membership;
+        state.capability_grants = vec![grant];
+
+        let decision = state.explain_policy(&remote, &protocol);
+
+        assert!(decision.allowed);
+        assert!(decision.reason.contains("active grant"));
+    }
+
+    #[test]
+    fn apply_revocations_updates_deny_state_without_snapshot_reload() {
+        let authority = crypto::IdentityKeypair::from_secret_bytes([21_u8; 32]);
+        let subject = crypto::IdentityKeypair::from_secret_bytes([22_u8; 32]);
+        let network = "revocation-only";
+        let membership = membership::MembershipCertificate::issue(
+            &authority,
+            NetworkId::derive(network),
+            subject.peer_id(),
+            100,
+            200,
+            vec!["member".to_string()],
+        );
+        let grant = membership::CapabilityGrant::issue(
+            &authority,
+            NetworkId::derive(network),
+            subject.peer_id(),
+            vec!["records.publish".to_string()],
+            vec![ProtocolId::new("/quicnet/records/1").expect("protocol")],
+            membership::ResourceLimits::default(),
+            vec![],
+            100,
+            200,
+            7,
+        );
+        let state = DaemonState {
+            network: network.to_string(),
+            local_peer_id: subject.peer_id(),
+            roles: vec![DaemonRole::Edge],
+            membership: membership.clone(),
+            capability_grants: vec![grant],
+            revocations: Vec::new(),
+            denied_peers: Vec::new(),
+            bootstrap: Vec::new(),
+            relay_map: None,
+            peers: Vec::new(),
+            netcheck: pending_netcheck(),
+            queue_policies: default_queue_policies(),
+            active_sessions: Vec::new(),
+            path_candidates: Vec::new(),
+        };
+        let revocation = membership::RevocationRecord::issue(
+            &authority,
+            NetworkId::derive(network),
+            membership::RevocationTarget::MembershipCertificate {
+                subject_peer_id: membership.subject_peer_id.clone(),
+                issued_at: membership.issued_at,
+            },
+            membership::RevocationReason::Administrative,
+            150,
+            150,
+            3,
+            Some("compromised".to_string()),
+        );
+
+        let (updated, added) = state.apply_revocations(vec![revocation.clone(), revocation]);
+
+        assert_eq!(added, 1);
+        assert_eq!(updated.revocations.len(), 1);
+        assert_eq!(updated.denied_peers.len(), 1);
+        assert!(updated.deny_reason(&membership.subject_peer_id).is_some());
+    }
+
+    #[test]
+    fn apply_relay_map_persists_announcements_into_peer_state() {
+        let mut state = fixture_daemon_state("relay-map");
+        state.relay_map = None;
+        state.peers.clear();
+        let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"iad-relay-1");
+        let relay_map = RelayMap {
+            version: 4,
+            generated_at: 1_720_123_456,
+            relays: vec![RelayAnnouncement {
+                peer_id: relay_peer.clone(),
+                region: "us-east-1".to_string(),
+                advertised_endpoints: vec!["quic://198.51.100.88:443".to_string()],
+                control_endpoint: "http://198.51.100.88:9081".to_string(),
+                max_bandwidth_bps: 3_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec!["NetworkControl".to_string()],
+            }],
+        };
+
+        let (updated, added) = state.apply_relay_map(relay_map.clone());
+
+        assert_eq!(added, 1);
+        assert_eq!(updated.relay_count(), 1);
+        assert_eq!(updated.relay_map, Some(relay_map));
+        assert!(updated.peer(&relay_peer).is_some());
+    }
+
+    #[test]
+    fn relay_map_synthesizes_fallback_for_bootstrap_peer_when_direct_udp_is_unavailable() {
+        let authority = crypto::IdentityKeypair::from_secret_bytes([31_u8; 32]);
+        let subject = crypto::IdentityKeypair::from_secret_bytes([32_u8; 32]);
+        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"bootstrap-relayed");
+        let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"fra-relay-bootstrap");
+        let network = "relay-fallback";
+        let snapshot = AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(network),
+            enrollment_token: None,
+            membership: Some(membership::MembershipCertificate::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                100,
+                200,
+                vec!["member".to_string()],
+            )),
+            capability_grants: vec![],
+            revocations: vec![],
+            bootstrap_hints: vec![membership::BootstrapHint {
+                peer_id: Some(bootstrap_peer.clone()),
+                addresses: vec!["quic://198.51.100.77:8443".to_string()],
+                metadata: BTreeMap::from([(
+                    "protocols".to_string(),
+                    "/quicnet/control/1".to_string(),
+                )]),
+            }],
+        };
+        let state = DaemonState::from_authority_snapshot(network, vec![DaemonRole::Edge], snapshot)
+            .expect("state should build from snapshot");
+        let relay_map = RelayMap {
+            version: 1,
+            generated_at: 1_720_555_000,
+            relays: vec![RelayAnnouncement {
+                peer_id: relay_peer.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.70:443".to_string()],
+                control_endpoint: format!("inproc://{relay_peer}"),
+                max_bandwidth_bps: 2_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec![
+                    "NetworkControl".to_string(),
+                    "InteractiveRpc".to_string(),
+                ],
+            }],
+        };
+
+        let (state, added) = state.apply_relay_map(relay_map);
+        let decision = state
+            .best_path(&bootstrap_peer, TrafficClass::Control)
+            .expect("relay fallback path should exist");
+
+        assert_eq!(added, 1);
+        assert_eq!(decision.selected.path_kind, PathKind::Relay);
+        assert_eq!(decision.selected.relay_peer, Some(relay_peer));
+        assert_eq!(decision.selected.source, PathSource::AuthorityRelay);
+    }
+
+    #[test]
+    fn relay_fallback_builds_relay_route_plan() {
+        let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-route");
+        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-target");
+        let authority = crypto::IdentityKeypair::from_secret_bytes([31_u8; 32]);
+        let subject = crypto::IdentityKeypair::from_secret_bytes([32_u8; 32]);
+        let network = "relay-route-prod";
+        let snapshot = AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(network),
+            enrollment_token: None,
+            membership: Some(membership::MembershipCertificate::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                100,
+                200,
+                vec!["member".to_string()],
+            )),
+            capability_grants: vec![membership::CapabilityGrant::issue(
+                &authority,
+                NetworkId::derive(network),
+                bootstrap_peer.clone(),
+                vec!["records.publish".to_string()],
+                vec![ProtocolId::new("/quicnet/control/1").expect("protocol")],
+                membership::ResourceLimits::default(),
+                vec![],
+                100,
+                200,
+                7,
+            )],
+            revocations: vec![],
+            bootstrap_hints: vec![membership::BootstrapHint {
+                peer_id: Some(bootstrap_peer.clone()),
+                addresses: vec!["quic://198.51.100.77:8443".to_string()],
+                metadata: BTreeMap::from([(
+                    "protocols".to_string(),
+                    "/quicnet/control/1".to_string(),
+                )]),
+            }],
+        };
+        let state = DaemonState::from_authority_snapshot(network, vec![DaemonRole::Edge], snapshot)
+            .expect("state should build from snapshot");
+        let relay_map = RelayMap {
+            version: 1,
+            generated_at: 1_720_555_000,
+            relays: vec![RelayAnnouncement {
+                peer_id: relay_peer.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.70:443".to_string()],
+                control_endpoint: format!("inproc://{relay_peer}"),
+                max_bandwidth_bps: 2_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec![
+                    "NetworkControl".to_string(),
+                    "InteractiveRpc".to_string(),
+                ],
+            }],
+        };
+        let (state, _) = state.apply_relay_map(relay_map);
+
+        let route = state
+            .route_plan(
+                &bootstrap_peer,
+                Some(ProtocolId::new("/quicnet/control/1").expect("protocol")),
+                TrafficClass::Control,
+            )
+            .expect("relay route plan should build");
+
+        assert_eq!(route.path_kind, PathKind::Relay);
+        let relay = route.relay.expect("relay plan should exist");
+        assert_eq!(relay.relay_peer, relay_peer);
+        assert_eq!(relay.destination_endpoints, vec!["quic://198.51.100.77:8443".to_string()]);
+        assert_eq!(relay.relay_endpoints, vec!["quic://203.0.113.70:443".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn realize_best_path_persists_accepted_relay_session() {
+        clear_registry();
+        let relay_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-runtime");
+        let bootstrap_peer = PeerId::from_public_key(KeyAlgorithm::Ed25519, b"relay-target-runtime");
+        let authority = crypto::IdentityKeypair::from_secret_bytes([41_u8; 32]);
+        let subject = crypto::IdentityKeypair::from_secret_bytes([42_u8; 32]);
+        let network = "relay-runtime-prod";
+        let state_path = std::env::temp_dir().join("quicnet-relay-runtime-state.json");
+        let snapshot = AuthorityArtifactSnapshot {
+            network_id: NetworkId::derive(network),
+            enrollment_token: None,
+            membership: Some(membership::MembershipCertificate::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                100,
+                200,
+                vec!["member".to_string()],
+            )),
+            capability_grants: vec![membership::CapabilityGrant::issue(
+                &authority,
+                NetworkId::derive(network),
+                subject.peer_id(),
+                vec!["control.access".to_string()],
+                vec![ProtocolId::new("/quicnet/control/1").expect("protocol")],
+                membership::ResourceLimits::default(),
+                vec![],
+                100,
+                200,
+                7,
+            )],
+            revocations: vec![],
+            bootstrap_hints: vec![membership::BootstrapHint {
+                peer_id: Some(bootstrap_peer.clone()),
+                addresses: vec!["quic://198.51.100.77:8443".to_string()],
+                metadata: BTreeMap::from([(
+                    "protocols".to_string(),
+                    "/quicnet/control/1".to_string(),
+                )]),
+            }],
+        };
+        let mut state =
+            DaemonState::from_authority_snapshot(network, vec![DaemonRole::Edge], snapshot)
+                .expect("state should build from snapshot");
+        state.netcheck.udp_reachable = false;
+        state.netcheck.ipv6_reachable = false;
+        let relay_map = RelayMap {
+            version: 1,
+            generated_at: 1_720_555_000,
+            relays: vec![RelayAnnouncement {
+                peer_id: relay_peer.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.70:443".to_string()],
+                control_endpoint: "http://203.0.113.70:9081".to_string(),
+                max_bandwidth_bps: 2_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec![
+                    "NetworkControl".to_string(),
+                    "InteractiveRpc".to_string(),
+                ],
+            }],
+        };
+        let (state, _) = state.apply_relay_map(relay_map);
+        state.save(&state_path).expect("state should persist");
+        register_relay(RelayService::new(RelayNode {
+            announcement: RelayAnnouncement {
+                peer_id: relay_peer.clone(),
+                region: "fra".to_string(),
+                advertised_endpoints: vec!["quic://203.0.113.70:443".to_string()],
+                control_endpoint: format!("inproc://{relay_peer}"),
+                max_bandwidth_bps: 2_000_000_000,
+                supports_quic_datagrams: true,
+                supports_path_migration: true,
+                traffic_classes: vec![
+                    "NetworkControl".to_string(),
+                    "InteractiveRpc".to_string(),
+                ],
+            },
+            quotas: vec![RelayQuota {
+                peer: subject.peer_id(),
+                max_bandwidth_bps: 100_000_000,
+                max_concurrent_sessions: 2,
+            }],
+            destinations: vec![relay::RelayDestination {
+                peer: bootstrap_peer.clone(),
+                protocols: vec![ProtocolId::new("/quicnet/control/1").expect("protocol")],
+            }],
+        }));
+        let control = LocalControlPlane::new(DaemonConfig::new(network, &state_path));
+        let transport = QuicTransportAdapter::with_identity(NetworkId::derive(network), subject.clone())
+            .with_relay_control(Arc::new(InProcessRelayControl));
+
+        let session = control
+            .realize_best_path(
+                &bootstrap_peer,
+                &ProtocolId::new("/quicnet/control/1").expect("protocol"),
+                TrafficClass::Control,
+                &transport,
+            )
+            .await
+            .expect("relay session should be accepted");
+
+        let persisted = DaemonState::load(&state_path).expect("persisted state should load");
+        assert_eq!(session.path_kind, PathKind::Relay);
+        assert!(session.relay_attempt_id.is_some());
+        assert_eq!(persisted.active_sessions.len(), 1);
+        assert_eq!(persisted.active_sessions[0].session_id, session.session_id);
+        let _ = std::fs::remove_file(state_path);
+    }
+}

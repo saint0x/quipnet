@@ -1,0 +1,11 @@
+target/
+**/target/
+.DS_Store
+*.log
+*.fozzy
+coverage/
+artifacts/
+dist/
+.fozzy/
+var/
+tmp/

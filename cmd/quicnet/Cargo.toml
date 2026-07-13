@@ -1,0 +1,16 @@
+[package]
+name = "quicnet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap.workspace = true
+crypto = { path = "../../crates/crypto" }
+identity = { path = "../../crates/identity" }
+observability = { path = "../../crates/observability" }
+fabric = { path = "../../crates/fabric" }
+quic = { path = "../../crates/quic" }
+rand.workspace = true
+tokio.workspace = true

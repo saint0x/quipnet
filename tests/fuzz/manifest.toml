@@ -1,0 +1,13 @@
+[fuzz]
+engine = "libfuzzer"
+minimum_targets = [
+  "transport-frame-decoder",
+  "record-envelope-decoder",
+  "relay-protocol-decoder",
+  "policy-evaluator",
+]
+
+[corpus]
+seed_dir = "tests/fuzz/corpus"
+regression_dir = "tests/fuzz/regressions"
+

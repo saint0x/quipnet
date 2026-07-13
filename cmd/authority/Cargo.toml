@@ -1,0 +1,18 @@
+[package]
+name = "authority"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+clap.workspace = true
+observability = { path = "../../crates/observability" }
+crypto = { path = "../../crates/crypto" }
+membership = { path = "../../crates/membership" }
+model = { path = "../../crates/model" }
+control = { path = "../../crates/control" }
+relaywire = { path = "../../crates/relaywire" }
+serde.workspace = true
+serde_json.workspace = true
+tiny_http = "0.12.0"

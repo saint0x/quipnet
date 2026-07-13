@@ -1,0 +1,16 @@
+[package]
+name = "transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+records = { path = "../records" }
+model = { path = "../model" }
+thiserror.workspace = true

@@ -1,0 +1,7 @@
+name = "relay-failover"
+description = "Chaos harness placeholder covering relay loss during active session migration."
+
+[faults]
+kill_relay = true
+drop_udp = true
+network_partition = false

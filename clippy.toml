@@ -1,0 +1,5 @@
+msrv = "1.81.0"
+too-many-arguments-threshold = 10
+type-complexity-threshold = 300
+doc-valid-idents = ["CGNAT", "PeerId", "NetworkId", "QUIC", "SBOM", "STUN"]
+

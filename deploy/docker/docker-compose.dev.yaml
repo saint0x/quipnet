@@ -1,0 +1,33 @@
+services:
+  quicnetd:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: quicnetd:dev
+    environment:
+      QUICNET_NETWORK: personalcloud-prod
+      QUICNET_STATE_PATH: /var/lib/quicnet/state.json
+    ports:
+      - "4433:4433/udp"
+    volumes:
+      - quicnet-data:/var/lib/quicnet
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/quicnet", "--network", "personalcloud-prod", "--state-path", "/var/lib/quicnet/state.json", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  relay:
+    image: quicnetd:dev
+    entrypoint: ["/usr/local/bin/relay"]
+    command: ["--region", "local", "--max-bandwidth-mbps", "9000"]
+    depends_on:
+      quicnetd:
+        condition: service_healthy
+    ports:
+      - "5443:4433/udp"
+    restart: unless-stopped
+
+volumes:
+  quicnet-data:

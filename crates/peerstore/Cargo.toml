@@ -1,0 +1,13 @@
+[package]
+name = "peerstore"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+records = { path = "../records" }
+model = { path = "../model" }
+serde.workspace = true

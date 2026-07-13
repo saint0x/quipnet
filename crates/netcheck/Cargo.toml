@@ -1,0 +1,11 @@
+[package]
+name = "netcheck"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true

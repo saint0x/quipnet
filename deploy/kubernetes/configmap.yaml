@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quicnet-config
+  namespace: quicnet-system
+data:
+  QUICNET_NETWORK: personalcloud-prod
+  QUICNET_STATE_PATH: /var/lib/quicnet/state.json

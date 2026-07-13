@@ -1,0 +1,20 @@
+[package]
+name = "quic"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+crypto = { path = "../crypto" }
+identity = { path = "../identity" }
+model = { path = "../model" }
+rand.workspace = true
+relay = { path = "../relay" }
+relaywire = { path = "../relaywire" }
+transport = { path = "../transport" }
+tokio.workspace = true

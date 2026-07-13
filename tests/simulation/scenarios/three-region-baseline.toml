@@ -1,0 +1,9 @@
+name = "three-region-baseline"
+description = "Deterministic three-region simulation seed for bootstrap, relay, and observer topology."
+seed = 7
+
+[regions]
+bootstrap = ["us-east-1"]
+relay = ["eu-central-1", "us-west-2"]
+observer = ["us-east-1", "eu-central-1", "us-west-2"]
+
